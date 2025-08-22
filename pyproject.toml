@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unipka"
+version = "0.1.0"
+description = "Unoffical wrapper around UnipKa"
+authors = [{name = "Finlay MacLean"}]
+readme = "README.md"
+license = {text = "Apache License 2.0"}
+dependencies = [
+    "requests",
+    "platformdirs",
+    "scipy",
+    "numpy",
+    "pandas",
+    "torch>2.3.0",
+    "rdkit",
+    "anywidget"
+]
+
+
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools]
+package-data = { "unipka" = ["data/*"] }
