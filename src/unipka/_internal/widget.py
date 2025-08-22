@@ -1,6 +1,5 @@
 import anywidget
 import traitlets
-import pandas as pd
 
 class Widget(anywidget.AnyWidget):
     _esm = """

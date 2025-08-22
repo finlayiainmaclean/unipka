@@ -1,5 +1,4 @@
 from typing import Dict, List
-from PIL import Image
 from rdkit import Chem
 from rdkit.Chem.Draw import MolsToGridImage
 from IPython.display import SVG, display

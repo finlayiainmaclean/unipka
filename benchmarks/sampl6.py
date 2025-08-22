@@ -6,9 +6,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy.stats import kendalltau
 from tqdm import tqdm
 import unipka
-from rdkit import Chem
 
-from unipka.unipka import EnumerationError
 
 
 def process_dataset(dataset_name, calc):
@@ -141,7 +139,7 @@ def main():
             results[dataset_name] = (None, {})
     
     # Create combined plot
-    fig = plot_results(results)
+    plot_results(results)
     
     # Save figure
     plt.savefig("benchmarks/sampl_comparison.png", dpi=300, bbox_inches='tight')

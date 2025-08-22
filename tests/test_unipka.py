@@ -2,7 +2,6 @@ import pytest
 import pandas as pd
 import numpy as np
 from rdkit import Chem
-import unipka
 from unipka.unipka import UnipKa, EnumerationError
 
 
@@ -37,7 +36,7 @@ class TestUnipKaInitialization:
     def test_init_custom_params(self):
         calc = UnipKa(batch_size=16, remove_hs=True, use_gpu=False)
         assert calc.batch_size == 16
-        assert calc.params["remove_hs"] == True
+        assert calc.params["remove_hs"]
         assert calc.device.type == 'cpu'
 
 
