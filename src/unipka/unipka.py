@@ -51,6 +51,52 @@ def _same_mol(mol1: Chem.Mol, mol2: Chem.Mol) -> bool:
     return inchi1==inchi2
 
 
+def validate_acid_base_pair(acid_macrostate, base_macrostate):
+    """
+    Validate that acid and base macrostates have consistent hydrogen counts.
+    Raises ValueError if validation fails.
+    
+    Parameters:
+    -----------
+    acid_smiles_list : list
+        List of SMILES for acid macrostate
+    base_smiles_list : list
+        List of SMILES for base macrostate
+    """
+    def count_hydrogens(smiles):
+        """Count total hydrogens in a molecule from SMILES"""
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"Invalid SMILES: {smiles}")
+        
+        # Add explicit hydrogens to get accurate count
+        mol_with_h = Chem.AddHs(mol)
+        return sum(1 for atom in mol_with_h.GetAtoms() if atom.GetSymbol() == 'H')
+        
+    
+    # Count hydrogens in all acid species
+    acid_h_counts = [count_hydrogens(smi) for smi in acid_macrostate]
+    base_h_counts = [count_hydrogens(smi) for smi in base_macrostate]
+    
+    # Check 1: All acid species have same number of hydrogens
+    acid_unique_counts = set(acid_h_counts)
+    if len(acid_unique_counts) != 1:
+        acid_counts_str = ", ".join([f"{smi}: {h}H" for smi, h in zip(acid_macrostate, acid_h_counts)])
+        raise ValueError(f"Acid species have different hydrogen counts: {acid_counts_str}")
+    
+    # Check 2: All base species have same number of hydrogens  
+    base_unique_counts = set(base_h_counts)
+    if len(base_unique_counts) != 1:
+        base_counts_str = ", ".join([f"{smi}: {h}H" for smi, h in zip(base_macrostate, base_h_counts)])
+        raise ValueError(f"Base species have different hydrogen counts: {base_counts_str}")
+    
+    # Check 3: Acid has exactly one more hydrogen than base
+    acid_h = acid_h_counts[0]
+    base_h = base_h_counts[0] 
+    
+    if acid_h != base_h + 1:
+        raise ValueError(f"Acid should have 1 more hydrogen than base. "
+                        f"Got acid: {acid_h}H, base: {base_h}H (difference: {acid_h - base_h})")
 
 
 class UnipKa(object):
@@ -211,17 +257,20 @@ class UnipKa(object):
         return ensemble, ensemble_free_energy
 
     #### Public functions ####
-    def get_macro_pka_from_macrostates(self, macrostate_A: list[str | Chem.Mol], macrostate_B: list[str | Chem.Mol]) -> float:
+    def get_macro_pka_from_macrostates(self, *, acid_macrostate: list[str | Chem.Mol], base_macrostate: list[str | Chem.Mol]) -> float:
 
-        if isinstance(macrostate_A[0], Chem.Mol):
-            macrostate_A = [Chem.MolToSmiles(mol) for mol in macrostate_A]
+        
+        validate_acid_base_pair(acid_macrostate=acid_macrostate, base_macrostate=base_macrostate)
+        
+        if isinstance(acid_macrostate[0], Chem.Mol):
+            acid_macrostate = [Chem.MolToSmiles(mol) for mol in acid_macrostate]
 
-        if isinstance(macrostate_B[0], Chem.Mol):
-            macrostate_B = [Chem.MolToSmiles(mol) for mol in macrostate_B]
+        if isinstance(base_macrostate[0], Chem.Mol):
+            base_macrostate = [Chem.MolToSmiles(mol) for mol in base_macrostate]
 
 
-        DfGm_A = self._predict(macrostate_A)
-        DfGm_B = self._predict(macrostate_B)
+        DfGm_A = self._predict(acid_macrostate)
+        DfGm_B = self._predict(base_macrostate)
         return log_sum_exp(DfGm_A.values()) - log_sum_exp(DfGm_B.values()) + TRANSLATE_PH
 
     def get_acidic_macro_pka(self, mol: Chem.Mol | str, /) -> float:

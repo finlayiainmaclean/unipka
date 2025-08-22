@@ -4,6 +4,9 @@ from typing import Callable, Dict, List, OrderedDict, Tuple, Union
 import pandas as pd
 from rdkit import Chem
 
+class ProtonationError(Exception):
+    pass
+
 FILTER_PATTERNS = list(
     map(
         Chem.MolFromSmarts,
@@ -212,8 +215,11 @@ def prot(mol: Chem.Mol, idx: int, mode: str) -> Chem.Mol:
         else:
             charge_H = atom_H.GetFormalCharge()
             numH_H = atom_H.GetTotalNumHs()
+            if numH_H==0:
+                raise ProtonationError(f"No hydrogen at atom index {idx} to remove.")
             atom_H.SetFormalCharge(charge_H - 1)
-            atom_H.SetNumExplicitHs(numH_H - 1)
+            new_numH_H = numH_H - 1
+            atom_H.SetNumExplicitHs(new_numH_H)
             atom_H.UpdatePropertyCache()
             mol_prot = Chem.AddHs(mw)
     elif mode == "b2a":

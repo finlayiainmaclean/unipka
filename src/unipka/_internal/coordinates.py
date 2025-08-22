@@ -4,6 +4,7 @@ import logging
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from rdkit.Geometry import Point3D
 from scipy.spatial.distance import cdist
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,10 @@ def set_coordinates(mol: Chem.Mol, coords: np.ndarray, conf_id: int = 0):
         mol.AddConformer(conf)
 
     conf = mol.GetConformer(conf_id)
-    conf.SetPositions(coords)
+    for i in range(mol.GetNumAtoms()):
+        x,y,z = coords[i]
+        conf.SetAtomPosition(i,Point3D(x,y,z))
+
 
 def mmff_optimise(
     mol: Chem.Mol, constrained_atom_idxs: list[int] | None = None

@@ -1,9 +1,14 @@
+### Unofficial inference wrapper around DPTech's UnipKa model
+
+This repo provides a simple wrapper around Zheng and co's fantastic UnipKa model. It refactors their [example notebook](https://www.bohrium.com/notebooks/38543442597) into a small python package. If you use this package in a scientific publication, please make sure to cite their work.
+
+As the UnipKa model provides pH-adjusted free energies (and therefore populations) for each microstate, we also provide a logD calcultor following the methodology of [Rowan Sci](https://chemrxiv.org/engage/chemrxiv/article-details/68388349c1cb1ecda02ba65d), by calculating the weighted average of logP values for each microstate. We also provide a state penalty function, also following the methodology of [Rowan Sci](https://chemrxiv.org/engage/chemrxiv/article-details/68388349c1cb1ecda02ba65d) and [Lawrenz and co](https://pubs.acs.org/doi/10.1021/acs.jcim.3c00150).
+
+
+We also provide a small Jupyter widget to visualise the microstate distributions across a range of pH values.
 ![](unipka.gif)
 
-`pip install .`
+Install using `pip install .`
 
-```
-import unipka
-calc = unipka.UnipKa()
-calc.draw_distribution("C1=NN=CN=C1", mode='jupyter')
-```
+
+Please see `examples.ipynb` or the unit tests for example usage.
