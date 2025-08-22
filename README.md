@@ -12,3 +12,15 @@ Install using `pip install .`
 
 
 Please see `examples.ipynb` or the unit tests for example usage.
+
+
+Performance on the SAMPL benchmarks (pKa prediction):
+
+![](benchmarks/sampl_results.png)
+
+Performance on logD benchmark:
+
+![](benchmarks/logd_results.png)
+
+
+

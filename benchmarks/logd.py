@@ -111,7 +111,7 @@ def main():
     plt.tight_layout()
 
     # Save figure
-    plt.savefig("benchmarks/logd_scatter.png", dpi=300)
+    plt.savefig("benchmarks/logd_results.png", dpi=300)
     plt.close()
 
 if __name__=="__main__":

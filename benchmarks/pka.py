@@ -28,7 +28,7 @@ def process_dataset(dataset_name, calc):
             macrostate_A = macrostate_A.split(",")
             macrostate_B = macrostate_B.split(",")
 
-            pka = calc.get_macro_pka_from_macrostates(macrostate_A=macrostate_A, macrostate_B=macrostate_B)
+            pka = calc.get_macro_pka_from_macrostates(acid_macrostate=macrostate_A, base_macrostate=macrostate_B)
             predictions.append(pka)
         except Exception as e:
             print(f"Error processing {macrostates_AB}: {repr(e)}")
@@ -142,7 +142,7 @@ def main():
     plot_results(results)
     
     # Save figure
-    plt.savefig("benchmarks/sampl_comparison.png", dpi=300, bbox_inches='tight')
+    plt.savefig("benchmarks/sampl_results.png", dpi=300, bbox_inches='tight')
     
     # Print summary
     print("\n--- SUMMARY ---")
