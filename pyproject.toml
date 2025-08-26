@@ -1,7 +1,6 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=61", "wheel", "build"]
 build-backend = "setuptools.build_meta"
-
 [project]
 name = "unipka"
 version = "0.1.0"
@@ -17,7 +16,8 @@ dependencies = [
     "pandas",
     "torch>2.3.0",
     "rdkit",
-    "anywidget"
+    "anywidget",
+    "matplotlib"
 ]
 
 

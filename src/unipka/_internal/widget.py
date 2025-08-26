@@ -70,19 +70,44 @@ class Widget(anywidget.AnyWidget):
         // Create box container to the right
         const boxContainer = layoutContainer.append("div")
             .style("width", "500px")
-            .style("height", (height + margin.top + margin.bottom) + "px")
-            .style("margin-left", "20px");
+            .style("height", (height + margin.top + margin.bottom - 50) + "px") // Reduced height to make room for button
+            .style("margin-left", "20px")
+            .style("display", "flex")
+            .style("flex-direction", "column");
         
         const g = svg.append("g")
             .attr("transform", `translate(${margin.left},${margin.top})`);
         
         // Function to render SMILES as image
         function renderSMILES(smiles, container, molName = null) {
-            container.selectAll("*").remove();
+            console.log("renderSMILES called with:", molName, smiles.substring(0, 20) + "...");
+            
+            // Clear container properly
+            const containerNode = container.node ? container.node() : container;
+            if (containerNode) {
+                containerNode.innerHTML = '';
+                console.log("Container cleared successfully");
+            } else {
+                console.error("Could not get container node");
+            }
+            
+            // Create molecule display container (flex-grow to take available space)
+            const moleculeContainer = container.append("div")
+                .style("flex-grow", "1")
+                .style("display", "flex")
+                .style("align-items", "center")
+                .style("justify-content", "center")
+                .style("text-align", "center");
+            
+            // Create button container (fixed height at bottom)
+            const buttonContainer = container.append("div")
+                .style("flex-shrink", "0")
+                .style("text-align", "center")
+                .style("padding-top", "10px");
             
             if (!RDKit || !smiles) {
                 // Fallback: display SMILES as text
-                const fallbackDiv = container.append("div")
+                const fallbackDiv = moleculeContainer.append("div")
                     .style("padding", "15px")
                     .style("text-align", "center");
                 
@@ -102,18 +127,45 @@ class Widget(anywidget.AnyWidget):
                     .style("line-height", "1.4")
                     .text(smiles || "No SMILES available");
                 
-                return;
-            }
-            
-            try {
-                const mol = RDKit.get_mol(smiles);
-                if (mol) {
-                    const svg_text = mol.get_svg(450, 250);
-                    container.html(svg_text);
-                    mol.delete();
-                } else {
-                    // Fallback for invalid SMILES
-                    const fallbackDiv = container.append("div")
+            } else {
+                try {
+                    const mol = RDKit.get_mol(smiles);
+                    if (mol) {
+                        const svg_text = mol.get_svg(450, 200); // Reduced height to make room for button
+                        const moleculeNode = moleculeContainer.node();
+                        if (moleculeNode) {
+                            moleculeNode.innerHTML = svg_text;
+                        }
+                        mol.delete();
+                    } else {
+                        // Fallback for invalid SMILES
+                        const fallbackDiv = moleculeContainer.append("div")
+                            .style("padding", "15px")
+                            .style("text-align", "center");
+                        
+                        if (molName) {
+                            fallbackDiv.append("div")
+                                .style("font-weight", "bold")
+                                .style("margin-bottom", "10px")
+                                .style("color", "#333")
+                                .text(molName);
+                        }
+                        
+                        fallbackDiv.append("div")
+                            .style("color", "#666")
+                            .text("Invalid SMILES");
+                        
+                        fallbackDiv.append("div")
+                            .style("font-family", "monospace")
+                            .style("font-size", "12px")
+                            .style("color", "#999")
+                            .style("margin-top", "5px")
+                            .text(smiles);
+                    }
+                } catch (error) {
+                    console.error("Error rendering SMILES:", error);
+                    // Fallback for render error
+                    const fallbackDiv = moleculeContainer.append("div")
                         .style("padding", "15px")
                         .style("text-align", "center");
                     
@@ -127,7 +179,7 @@ class Widget(anywidget.AnyWidget):
                     
                     fallbackDiv.append("div")
                         .style("color", "#666")
-                        .text("Invalid SMILES");
+                        .text("Error rendering molecule");
                     
                     fallbackDiv.append("div")
                         .style("font-family", "monospace")
@@ -136,31 +188,45 @@ class Widget(anywidget.AnyWidget):
                         .style("margin-top", "5px")
                         .text(smiles);
                 }
-            } catch (error) {
-                console.error("Error rendering SMILES:", error);
-                // Fallback for render error
-                const fallbackDiv = container.append("div")
-                    .style("padding", "15px")
-                    .style("text-align", "center");
-                
-                if (molName) {
-                    fallbackDiv.append("div")
-                        .style("font-weight", "bold")
-                        .style("margin-bottom", "10px")
-                        .style("color", "#333")
-                        .text(molName);
-                }
-                
-                fallbackDiv.append("div")
-                    .style("color", "#666")
-                    .text("Error rendering molecule");
-                
-                fallbackDiv.append("div")
-                    .style("font-family", "monospace")
-                    .style("font-size", "12px")
-                    .style("color", "#999")
-                    .style("margin-top", "5px")
-                    .text(smiles);
+            }
+            
+            // Add Copy SMILES button if SMILES is available
+            if (smiles) {
+                const copyButton = buttonContainer.append("button")
+                    .style("padding", "8px 16px")
+                    .style("background-color", "#2d5a2d")
+                    .style("color", "white")
+                    .style("border", "none")
+                    .style("border-radius", "5px")
+                    .style("cursor", "pointer")
+                    .style("font-size", "14px")
+                    .style("font-weight", "500")
+                    .text("Copy SMILES")
+                    .on("click", function() {
+                        // Copy SMILES to clipboard
+                        navigator.clipboard.writeText(smiles).then(() => {
+                            // Visual feedback - change button text temporarily
+                            d3.select(this)
+                                .text("Copied!")
+                                .style("background-color", "#4a8a4a");
+                            
+                            setTimeout(() => {
+                                d3.select(this)
+                                    .text("Copy SMILES")
+                                    .style("background-color", "#2d5a2d");
+                            }, 1500);
+                        }).catch(err => {
+                            console.error('Failed to copy SMILES: ', err);
+                            // Fallback - show alert with SMILES
+                            alert('Copy failed. SMILES: ' + smiles);
+                        });
+                    })
+                    .on("mouseover", function() {
+                        d3.select(this).style("background-color", "#1e3e1e");
+                    })
+                    .on("mouseout", function() {
+                        d3.select(this).style("background-color", "#2d5a2d");
+                    });
             }
         }
         
@@ -173,7 +239,7 @@ class Widget(anywidget.AnyWidget):
             // Render SMILES from first row in the box
             if (data.length > 0) {
                 const firstRow = data[0];
-                renderSMILES(firstRow.smiles, d3.select(boxContainer.node()), firstRow.name);
+                renderSMILES(firstRow.smiles, boxContainer, firstRow.name);
             }
             
             
@@ -203,9 +269,11 @@ class Widget(anywidget.AnyWidget):
                 .curve(d3.curveMonotoneX);
             
             // Create lines for each SMILES
+            let groupIndex = 0;
             groupedBySmiles.forEach((values, smiles) => {
                 // Sort by pH for proper line drawing
                 const sortedValues = values.sort((a, b) => a.pH - b.pH);
+                const currentGroupIndex = groupIndex++; // Unique index for this group
                 
                 g.append("path")
                     .datum(sortedValues)
@@ -214,6 +282,7 @@ class Widget(anywidget.AnyWidget):
                     .attr("stroke-width", 2)
                     .attr("d", line)
                     .attr("data-smiles", smiles)
+                    .attr("data-group-index", currentGroupIndex)
                     .on("mouseover", function(event) {
                         // Highlight line
                         d3.select(this).attr("stroke-width", 4);
@@ -230,7 +299,8 @@ class Widget(anywidget.AnyWidget):
                         
                         // Get the first data point to show name
                         const firstPoint = sortedValues[0];
-                        tooltip.html(`${firstPoint.name}<br>SMILES: ${smiles}`)
+                        tooltip.html(`${firstPoint.name}<br>pH: ${firstPoint.pH.toFixed(2)}<br>Population: ${firstPoint.population.toFixed(4)}<br>SMILES: ${smiles}`)
+                            .style('font-size', '12px')
                             .style("left", (event.pageX + 10) + "px")
                             .style("top", (event.pageY - 10) + "px");
                     })
@@ -241,11 +311,11 @@ class Widget(anywidget.AnyWidget):
                     });
                 
                 // Add invisible clickable points
-                g.selectAll(`.point-${smiles.replace(/[^a-zA-Z0-9]/g, '')}`)
+                g.selectAll(`.point-group-${currentGroupIndex}`)
                     .data(sortedValues)
                     .enter()
                     .append("circle")
-                    .attr("class", `point-${smiles.replace(/[^a-zA-Z0-9]/g, '')}`)
+                    .attr("class", `point-group-${currentGroupIndex}`)
                     .attr("cx", d => xScale(d.pH))
                     .attr("cy", d => yScale(d.population))
                     .attr("r", 4)
@@ -264,25 +334,28 @@ class Widget(anywidget.AnyWidget):
                         
                         tooltip.html(`${d.name}<br>pH: ${d.pH.toFixed(2)}<br>Population: ${d.population.toFixed(4)}<br>SMILES: ${d.smiles}<br><em>Click to view molecule</em>`)
                             .style("left", (event.pageX + 10) + "px")
-                            .style("top", (event.pageY - 10) + "px");
+                            .style("top", (event.pageY - 10) + "px")
+                            .style('font-size', '12px');
                         
                         // Highlight the corresponding line
-                        d3.select(`path[data-smiles="${smiles}"]`)
+                        d3.select(`path[data-group-index="${currentGroupIndex}"]`)
                             .attr("stroke-width", 4);
                     })
                     .on("mouseout", function() {
                         d3.selectAll(".tooltip").remove();
                         
                         // Restore line width
-                        d3.select(`path[data-smiles="${smiles}"]`)
+                        d3.select(`path[data-group-index="${currentGroupIndex}"]`)
                             .attr("stroke-width", 2);
                     })
                     .on("click", function(event, d) {
-                        // Update SMILES display in box
-                        renderSMILES(d.smiles, d3.select(boxContainer.node()), d.name);
+                        console.log("Clicked on point:", d.name, "SMILES:", d.smiles.substring(0, 20) + "...");
+                        
+                        // Update SMILES display in box - use the boxContainer directly
+                        renderSMILES(d.smiles, boxContainer, d.name);
                         
                         // Visual feedback - briefly highlight the line
-                        d3.select(`path[data-smiles="${smiles}"]`)
+                        d3.select(`path[data-group-index="${currentGroupIndex}"]`)
                             .transition()
                             .duration(200)
                             .attr("stroke-width", 6)
@@ -341,8 +414,3 @@ class Widget(anywidget.AnyWidget):
         data_list = self.df.to_dict('records')
         import json
         self.data = json.dumps(data_list)
-
-# Usage example:
-# widget = MicrostateWidget(your_dataframe)
-# widget.set_ph(3.5)  # Set pH to 3.5
-# widget  # Display in Jupyter
