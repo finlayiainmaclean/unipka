@@ -16,19 +16,20 @@ Please see `examples.ipynb` or the unit tests for example usage.
 
 Performance on the SAMPL benchmarks (pKa prediction):
 
-![](benchmarks/sampl_results.png)
+<img src="benchmarks/sampl_results.png">
 
 Performance on logD benchmark:
 
-![](benchmarks/logd_results.png)
+<img src="benchmarks/logd_results.png" width="600">
+
 
 Performance on solvation benchmark:
 
-![](benchmarks/solvation_results.png)
+<img src="benchmarks/solvation_results.png" width="600">
 
 Performance on Kpuu benchmark:
 
-<img src="benchmarks/kpuu_results.png" width="300">
+<img src="benchmarks/kpuu_results.png" width="600">
 
 
 
