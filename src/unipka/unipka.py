@@ -14,6 +14,7 @@ from rdkit.Chem import Crippen
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
+from ._internal.solvation import get_solvation_energy
 from ._internal.draw import calc_base_name, draw_ensemble, get_neutral_base_name
 from ._internal.conformer import ConformerGen
 from ._internal.dataset import MolDataset
@@ -100,8 +101,8 @@ def validate_acid_base_pair(acid_macrostate, base_macrostate):
 
 
 class UnipKa(object):
-    def __init__(self, batch_size=32, remove_hs=False, use_gpu=True, use_simple_smarts: bool = True):
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() and use_gpu else "cpu")
+    def __init__(self, batch_size=32, remove_hs=False, use_simple_smarts: bool = False):
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         model_path = get_model_path()
         pattern_path = get_pattern_path(use_simple_smarts=use_simple_smarts)
 
@@ -433,10 +434,27 @@ class UnipKa(object):
 
         # Calculate state penalty: SP = -RT * ln(sum of reference populations)
         SP_J_mol = -R * T * math.log(sum_reference_pop)
-        SP_kcal_mol = SP_J_mol / (4184)  # Convert to kcal/mol
+        SP_kcal_mol = SP_J_mol / 4184  # Convert to kcal/mol
 
         return SP_kcal_mol, reference_microstates_df
+    
+    def predict_brain_penetrance(self, mol: Chem.Mol, add_state_correction: bool = True) -> float:
+        sp, ref_df = self.get_state_penalty(mol, pH=7.4)
+        mol = ref_df.iloc[0].mol
+        G_solv = get_solvation_energy(mol)
 
+        if add_state_correction:
+            weights = np.array([ 0.27883664, -0.7103157 ])
+            bias = 5.64817169
+            X = np.array([G_solv, sp]).reshape(1, -1)
+        else:
+            weights = np.array([0.20473481])
+            bias = 3.425158650365753
+            X = np.array([G_solv, sp]).reshape(1, -1)
+        logits = np.dot(X, weights) + bias
+        prob = 1 / (1 + np.exp(-logits))
+        return prob
+    
     def get_logd(self, mol: Chem.Mol | str, /, *,  pH: float) -> float:
         """
         Compute logD(pH) from microstate populations and logP values.
@@ -481,4 +499,81 @@ class UnipKa(object):
 
         return logd
     
+    def draw_logd_distribution(self, mol: Chem.Mol | str, /, mode: Literal["matplotlib"]) -> pd.DataFrame:
+        """
+        Draw logD distribution across pH range.
+        
+        Parameters:
+        - mol: RDKit Mol object or SMILES string
+        - mode: Plotting mode ("matplotlib")
+        
+        Returns:
+        - DataFrame containing pH and logD values
+        """
+        
+        if isinstance(mol, str):
+            mol = Chem.MolFromSmiles(mol)
+
+        query_smi = Chem.CanonSmiles(Chem.MolToSmiles(mol))
+
+        # Free energy predictions from your model, grouped by charge
+        ensemble, ensemble_free_energy = self._predict_ensemble_free_energy(query_smi)
+
+        pHs = np.linspace(0, 14, 1000)
+   
+        distribution_dfs = []
+        logd_values = []
+
+        logp_cache = dict()
+        
+        for pH in pHs:
+            distribution_df = self._get_distribution_from_free_energy(ensemble_free_energy, pH=pH)
+            distribution_df['pH'] = pH
+            distribution_dfs.append(distribution_df)
+            
+            # Calculate logD for this pH
+            logP_list = []
+            weighted_linear_logP = []
+
+            for _, row in distribution_df.iterrows():
+                charge = row["charge"]
+                pop = row["population"]
+                smi_microstate = row['smiles']
+
+                # logP for neutral species
+                if charge == 0:
+                    logP = logp_cache.get(smi_microstate)
+                    if not logP:
+                        mol_microstate = Chem.MolFromSmiles(smi_microstate)
+                        logP = Crippen.MolLogP(mol_microstate)
+                        logp_cache[smi_microstate] = logP
+                else:
+                    logP = -2.0  # fixed logP for ionic species
+
+                logP_list.append(logP)
+                weighted_linear_logP.append(pop * (10**logP))
+
+            # Compute logD from weighted sum in linear space
+            logd = np.log10(sum(weighted_linear_logP))
+            logd_values.append(logd)
+        
+        # Create DataFrame with logD results
+        logd_df = pd.DataFrame({
+            'pH': pHs,
+            'logD': logd_values
+        })
+
+        match mode:
+            case "matplotlib":
+                plt.figure(figsize=(14, 3), dpi=200)
+                plt.plot(pHs, logd_values, linewidth=2, color='blue', label='logD')
+                plt.xlabel("pH")
+                plt.ylabel("logD")
+                plt.grid(True, alpha=0.3)
+                plt.show()
+            case _:
+                raise ValueError(f"{mode} not a valid mode. Choose from `matplotlib`")
+        
+
     
+
