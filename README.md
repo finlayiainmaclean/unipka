@@ -8,11 +8,10 @@ This repo provides:
 - A logD calculator following the methodology of [Rowan Sci](https://chemrxiv.org/engage/chemrxiv/article-details/68388349c1cb1ecda02ba65d), by calculating the weighted average of logP values for each microstate. 
 - A state penalty function, useful for calculating permeability of neutral species, also following the methodology of [Rowan Sci](https://chemrxiv.org/engage/chemrxiv/article-details/68388349c1cb1ecda02ba65d) and [Lawrenz and co](https://pubs.acs.org/doi/10.1021/acs.jcim.3c00150). 
 - A solvation energy calculator using a semiemperical QM code and the ALPB implicit solvent model.
-- A Kpuu calculator built using Kpuu, logD and the state penalty to neutralise the model as features.
+- A Kpuu calculator built using Kpuu, logD and the state penalty as features.
 - A small Jupyter widget to visualise the microstate distributions across a range of pH values.
 
-
-Please cite the corresponding authors if you use this wrapper in your work.
+Please cite the corresponding authors if you use this wrapper in your work!
 
 ![](unipka.gif)
 
