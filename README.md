@@ -28,7 +28,8 @@ Performance on solvation benchmark:
 
 Performance on Kpuu benchmark:
 
-![](benchmarks/kpuu_results.png)
+<img src="benchmarks/kpuu_results.png" width="300">
+
 
 
 
