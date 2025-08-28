@@ -23,7 +23,7 @@ Performance on logD benchmark:
 <img src="benchmarks/logd_results.png" width="600">
 
 
-Performance on solvation benchmark:
+Performance on FreeSolv benchmark (solvation prediction):
 
 <img src="benchmarks/solvation_results.png" width="600">
 
