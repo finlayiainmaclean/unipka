@@ -1,9 +1,12 @@
 import hashlib
+import numpy as np
 import requests
 from pathlib import Path
 from platformdirs import user_cache_dir
 from .version import __version__
 import importlib.resources as res
+from sklearn.linear_model import LogisticRegression, LinearRegression
+
 
 ASSET_NAME = "t_dwar_v_novartis_a_b.pt"
 ASSET_URL = f"https://github.com/finlayiainmaclean/unipka/releases/download/v{__version__}/{ASSET_NAME}"
@@ -39,3 +42,18 @@ def get_model_path() -> Path:
 
 def get_pattern_path(use_simple_smarts: bool = True):
     return res.files("unipka.data").joinpath("simple_smarts_pattern.tsv" if use_simple_smarts else "smarts_pattern.tsv")
+
+def load_kpuu_model():
+    weights_file = res.files("unipka.data").joinpath("weights.kpuu.npz")
+    params = np.load(weights_file)
+    clf = LogisticRegression()
+    clf.fit(np.ones((2,3)), np.array([0,1])) # Dummy fit
+    clf.coef_ = params["coef"]
+    clf.intercept_ = params["intercept"]
+    return clf
+
+
+
+
+
+

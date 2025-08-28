@@ -14,7 +14,7 @@ from rdkit.Chem import Crippen
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
-from ._internal.solvation import get_solvation_energy
+from ._internal.solvation import get_solvation_energy as _get_solvation_energy
 from ._internal.draw import calc_base_name, draw_ensemble, get_neutral_base_name
 from ._internal.conformer import ConformerGen
 from ._internal.dataset import MolDataset
@@ -23,7 +23,7 @@ from ._internal.template import LN10, TRANSLATE_PH, enumerate_template, get_ense
 from ._internal.coordinates import transplant_coordinates
 from ._internal.widget import Widget
 
-from .assets import get_model_path, get_pattern_path
+from .assets import get_model_path, get_pattern_path, load_kpuu_model
 
 
 RDLogger.DisableLog("rdApp.*")
@@ -292,7 +292,7 @@ class UnipKa(object):
         protomer_mol =  df.iloc[0].mol
         return protomer_mol
 
-    def draw_distribution(self, mol: Chem.Mol | str, /, mode: Literal["matplotlib", "jupyter"]) -> pd.DataFrame:
+    def draw_distribution(self, mol: Chem.Mol | str, /, mode: Literal["matplotlib", "jupyter"] = "matplotlib") -> pd.DataFrame:
 
         
         if isinstance(mol, str):
@@ -438,22 +438,20 @@ class UnipKa(object):
 
         return SP_kcal_mol, reference_microstates_df
     
-    def predict_brain_penetrance(self, mol: Chem.Mol, add_state_correction: bool = True) -> float:
+    @staticmethod
+    def get_solvation_energy(mol: Chem.Mol | str, /) -> float:
+        if isinstance(mol, str):
+            mol = Chem.MolFromSmiles(mol)
+        return _get_solvation_energy(mol)
+    
+    def predict_brain_penetrance(self, mol: Chem.Mol) -> float:
         sp, ref_df = self.get_state_penalty(mol, pH=7.4)
         mol = ref_df.iloc[0].mol
-        G_solv = get_solvation_energy(mol)
-
-        if add_state_correction:
-            weights = np.array([ 0.27883664, -0.7103157 ])
-            bias = 5.64817169
-            X = np.array([G_solv, sp]).reshape(1, -1)
-        else:
-            weights = np.array([0.20473481])
-            bias = 3.425158650365753
-            X = np.array([G_solv, sp]).reshape(1, -1)
-        logits = np.dot(X, weights) + bias
-        prob = 1 / (1 + np.exp(-logits))
-        return prob
+        G_solv = _get_solvation_energy(mol)
+        logD = self.get_logd(mol, pH=7.4)
+        clf = load_kpuu_model()
+        X= np.array([[G_solv, logD, sp]])
+        return clf.predict_proba(X)[0,1]
     
     def get_logd(self, mol: Chem.Mol | str, /, *,  pH: float) -> float:
         """
@@ -499,7 +497,7 @@ class UnipKa(object):
 
         return logd
     
-    def draw_logd_distribution(self, mol: Chem.Mol | str, /, mode: Literal["matplotlib"]) -> pd.DataFrame:
+    def draw_logd_distribution(self, mol: Chem.Mol | str, /, mode: Literal["matplotlib"] = "matplotlib") -> pd.DataFrame:
         """
         Draw logD distribution across pH range.
         
@@ -517,7 +515,7 @@ class UnipKa(object):
         query_smi = Chem.CanonSmiles(Chem.MolToSmiles(mol))
 
         # Free energy predictions from your model, grouped by charge
-        ensemble, ensemble_free_energy = self._predict_ensemble_free_energy(query_smi)
+        _, ensemble_free_energy = self._predict_ensemble_free_energy(query_smi)
 
         pHs = np.linspace(0, 14, 1000)
    
@@ -557,11 +555,6 @@ class UnipKa(object):
             logd = np.log10(sum(weighted_linear_logP))
             logd_values.append(logd)
         
-        # Create DataFrame with logD results
-        logd_df = pd.DataFrame({
-            'pH': pHs,
-            'logD': logd_values
-        })
 
         match mode:
             case "matplotlib":

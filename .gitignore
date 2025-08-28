@@ -20,6 +20,8 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.ruff_cache/
+.claude/
 
 # pytest
 .pytest_cache/

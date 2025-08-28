@@ -8,10 +8,9 @@ from unipka._internal.solvation import get_solvation_energy
 from rdkit import Chem
 import ray
 from unipka.unipka import UnipKa
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import roc_auc_score, roc_curve
-
 
 
 def calculate_corrected_solvation_energy(mol):
@@ -19,14 +18,15 @@ def calculate_corrected_solvation_energy(mol):
     sp, ref_df = calc.get_state_penalty(mol, pH=7.4)
     mol = ref_df.iloc[0].mol
     G_solv = get_solvation_energy(mol)
-    return G_solv, sp
+    logD = calc.get_logd(mol, pH=7.4)
+    return G_solv, sp, logD
 
 def _calculate_corrected_solvation_energy(mol):
     try: 
         return calculate_corrected_solvation_energy(mol)
     except:
         print(Chem.MolToSmiles(mol))
-        return None, None
+        return None, None, None
 
 
 def analyze_brain_penetration(df, kpuu_column='Kpuu'):
@@ -42,21 +42,23 @@ def analyze_brain_penetration(df, kpuu_column='Kpuu'):
     y_binary = (df[kpuu_column] > 0.3).astype(int)
     
     print(f"Brain-penetrant compounds: {y_binary.sum()} / {len(y_binary)} ({100*y_binary.mean():.1f}%)")
-    
-    # Prepare descriptors
-    # Schrodinger approach: G_solv only
-    X1 = df[['G_solv']].values
-    
-    # AIMNet2/CPCM-X approach: G_solv + SP
-    X2 = (df['G_solv'] + df['sp']).values.reshape(-1, 1)
+
+    X0 = df[['G_solv']].values
+    X1 = df[['G_solv', 'sp']].values
+    X2 = df[['G_solv', 'logD']].values
+    X3 = df[['G_solv', 'logD','sp']].values
+
     
     # 5-fold stratified cross-validation
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     
-    # Train and evaluate both models
+    # Train and evaluate models
     models = {
-        'G_solv': X1,
-        'G_solv + SP': X2
+        'G_solv': X0,
+        'G_solv + SP': X1,
+        'G_solv + logD': X2,
+        'G_solv + logD + SP': X3,
+
     }
     
     results = {}
@@ -110,7 +112,7 @@ def process_dataset():
     """Process a single dataset and return results DataFrame with metrics"""
     print(f"\n--- Processing Kpuu ---")
     
-    df = pd.read_csv("/tmp/kpuu.csv")
+    df = pd.read_csv("benchmarks/kpuu.csv")
     df.Kpuu = df.Kpuu.apply(lambda x: float(x.replace(",",".")))
 
     df['mol']  = [Chem.MolFromSmiles(s) for s in df['canonical SMILES']]
@@ -118,7 +120,7 @@ def process_dataset():
 
     ray_func = ray.remote(_calculate_corrected_solvation_energy)
     results = ray.get([ray_func.remote(smi) for smi in df.mol])
-    df['G_solv'], df['sp'] = zip(*results)
+    df['G_solv'], df['sp'], df['logD'] = zip(*results)
     df = df.dropna(subset=['G_solv'])
     
     # Clean data
@@ -138,26 +140,18 @@ def main():
     
     df = process_dataset()
 
-    import pdb; pdb.set_trace()
-
     clf = LogisticRegression()
-    X = (df['G_solv'] + df['sp']).values.reshape(-1, 1)
+    X = df[['G_solv','logD','sp']].values
     y = df.Kpuu > 0.3
-    clf.fit(df[['G_solv','sp']].values, y)
+    clf.fit(X, y)
 
-    corrected_weights = clf.coef_[0]  # Shape: (n_features,) for binary classification
-    corrected_bais = clf.intercept_[0]  # Scalar for binary classification
+    # Save weights
+    weights = {
+        "coef": clf.coef_.copy(),
+        "intercept": clf.intercept_.copy()
+    }
 
-    print("CORRECTED:", corrected_weights, corrected_bais)
-
-    clf = LogisticRegression()
-    clf.fit(df[['G_solv']].values, y)
-
-    uncorrected_weights = clf.coef_[0]  # Shape: (n_features,) for binary classification
-    uncorrected_bias = clf.intercept_[0]  # Scalar for binary classification
-
-    print("UNCORRECTED:", uncorrected_weights, uncorrected_bias)
-
+    np.savez("src/unipka/data/weights.kpuu.npz", **weights)
     analyze_brain_penetration(df)
 
 
