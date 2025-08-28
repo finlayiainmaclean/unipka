@@ -22,5 +22,13 @@ Performance on logD benchmark:
 
 ![](benchmarks/logd_results.png)
 
+Performance on solvation benchmark:
+
+![](benchmarks/solvation_results.png)
+
+Performance on Kpuu benchmark:
+
+![](benchmarks/kpuu_results.png)
+
 
 
