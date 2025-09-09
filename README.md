@@ -30,13 +30,13 @@ Performance on logD benchmark:
 <img src="benchmarks/logd_results.png" width="600">
 
 
-Performance on FreeSolv benchmark (solvation prediction):
-
-<img src="benchmarks/solvation_results.png" width="600">
-
 Performance on Kpuu benchmark:
 
 <img src="benchmarks/kpuu_results.png" width="600">
+
+Performance on FreeSolv benchmark (solvation prediction):
+
+<img src="benchmarks/solvation_results.png" width="600">
 
 
 
