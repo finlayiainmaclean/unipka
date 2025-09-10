@@ -5,11 +5,11 @@ This repo provides a simple wrapper around Zheng and co's fantastic [UnipKa](htt
 This repo provides:
 
 - A macro and micro pKa calculator, including pH-adjusted free energies for each microstate
-- A logD calculator following the methodology of [Rowan Sci](https://chemrxiv.org/engage/chemrxiv/article-details/68388349c1cb1ecda02ba65d), by calculating the weighted average of logP values for each microstate. 
+- A logD calculator following the methodology of [Rowan Sci](https://chemrxiv.org/engage/chemrxiv/article-details/68388349c1cb1ecda02ba65d), calculating the weighted average of logP values for each microstate. 
 - A state penalty function, useful for calculating permeability of neutral species, also following the methodology of [Rowan Sci](https://chemrxiv.org/engage/chemrxiv/article-details/68388349c1cb1ecda02ba65d) and [Lawrenz and co](https://pubs.acs.org/doi/10.1021/acs.jcim.3c00150). 
-- A solvation energy calculator that uses xTB and the ALPB implicit solvent model.
+- A aqueous solvation energy calculator that uses xTB and the ALPB implicit solvent model.
 - A Kpuu calculator built using Kpuu, logD and the state penalty as features.
-- A small Jupyter widget to visualise the microstate distributions across a range of pH values.
+- A Jupyter widget to visualise the microstate distributions across a range of pH values.
 
 Please cite the corresponding authors if you use this wrapper in your work!
 
