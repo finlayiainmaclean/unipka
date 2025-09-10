@@ -8,7 +8,7 @@ from unipka.unipka import UnipKa, EnumerationError
 @pytest.fixture
 def unipka_calc():
     """Fixture providing UnipKa calculator instance."""
-    return UnipKa(batch_size=16, use_gpu=False)
+    return UnipKa(batch_size=16)
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ class TestUnipKaInitialization:
         assert hasattr(calc, 'template_b2a')
 
     def test_init_custom_params(self):
-        calc = UnipKa(batch_size=16, remove_hs=True, use_gpu=False)
+        calc = UnipKa(batch_size=16, remove_hs=True)
         assert calc.batch_size == 16
         assert calc.params["remove_hs"]
         assert calc.device.type == 'cpu'
@@ -113,7 +113,7 @@ class TestUnipKaPublicMethods:
         # Simple test with manually defined macrostates
         macrostate_a = ["CC(=O)O"]  # acetic acid
         macrostate_b = ["CC(=O)[O-]"]  # acetate
-        pka = unipka_calc.get_macro_pka_from_macrostates(macrostate_a, macrostate_b)
+        pka = unipka_calc.get_macro_pka_from_macrostates(acid_macrostate=macrostate_a, base_macrostate=macrostate_b)
         assert isinstance(pka, float)
         assert 0 < pka < 14
 
@@ -121,7 +121,7 @@ class TestUnipKaPublicMethods:
         # Test with Mol objects
         mol_a = [Chem.MolFromSmiles("CC(=O)O")]
         mol_b = [Chem.MolFromSmiles("CC(=O)[O-]")]
-        pka = unipka_calc.get_macro_pka_from_macrostates(mol_a, mol_b)
+        pka = unipka_calc.get_macro_pka_from_macrostates(acid_macrostate=mol_a, base_macrostate=mol_b)
         assert isinstance(pka, float)
         assert 0 < pka < 14
 
@@ -186,7 +186,7 @@ class TestUnipKaErrorHandling:
 
     def test_empty_macrostate_lists(self, unipka_calc):
         with pytest.raises((IndexError, ValueError)):
-            unipka_calc.get_macro_pka_from_macrostates([], [])
+            unipka_calc.get_macro_pka_from_macrostates(acid_macrostate=[], base_macrostate=[])
 
     def test_ph_extreme_values(self, unipka_calc, sample_molecules):
         # Test with extreme pH values

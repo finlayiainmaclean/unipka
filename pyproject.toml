@@ -7,7 +7,7 @@ version = "0.1.0"
 description = "Unoffical wrapper around UnipKa"
 authors = [{name = "Finlay MacLean"}]
 readme = "README.md"
-license = {text = "Apache License 2.0"}
+license = {text = "MIT"}
 dependencies = [
     "requests",
     "platformdirs",
@@ -18,7 +18,8 @@ dependencies = [
     "torch>2.3.0",
     "rdkit",
     "anywidget",
-    "matplotlib"
+    "matplotlib",
+    "scikit-learn"
 ]
 
 

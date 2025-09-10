@@ -261,13 +261,15 @@ class UnipKa(object):
     def get_macro_pka_from_macrostates(self, *, acid_macrostate: list[str | Chem.Mol], base_macrostate: list[str | Chem.Mol]) -> float:
 
         
-        validate_acid_base_pair(acid_macrostate=acid_macrostate, base_macrostate=base_macrostate)
+        
         
         if isinstance(acid_macrostate[0], Chem.Mol):
             acid_macrostate = [Chem.MolToSmiles(mol) for mol in acid_macrostate]
 
         if isinstance(base_macrostate[0], Chem.Mol):
             base_macrostate = [Chem.MolToSmiles(mol) for mol in base_macrostate]
+
+        validate_acid_base_pair(acid_macrostate=acid_macrostate, base_macrostate=base_macrostate)
 
 
         DfGm_A = self._predict(acid_macrostate)
