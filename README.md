@@ -18,7 +18,7 @@ Please cite the corresponding authors if you use this wrapper in your work!
 Install using `pip install unipka`
 
 
-Please see `examples.ipynb` or the unit tests for example usage.
+Please see `examples.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1JQXbARpmfol0R4hzGISONCS9prgH-NSq?usp=sharing) or the unit tests for example usage.
 
 
 Performance on the SAMPL benchmarks (pKa prediction):
