@@ -370,6 +370,9 @@ class UnipKa(object):
         df = pd.DataFrame(
             records, columns=["charge", "smiles", "free_energy", "ph_adjusted_free_energy", "boltzmann_factor"]
         )
+
+        df["relative_ph_adjusted_free_energy"] = df.ph_adjusted_free_energy - df.ph_adjusted_free_energy.min()
+        df["relative_free_energy"] = df.free_energy - df.free_energy.min()
         df["population"] = df["boltzmann_factor"] / partition_function
 
         # Sort for readability

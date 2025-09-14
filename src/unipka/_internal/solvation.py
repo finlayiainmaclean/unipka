@@ -80,6 +80,15 @@ def get_xtb_solvation(mol: Chem.Mol, charge: int =0, num_cores: int =1) -> float
             env=env,
             shell=True
         )
+        # Use a regex to match "TOTAL ENERGY" followed by whitespace and a number
+        total_energy_match = re.search(r"TOTAL ENERGY\s+(-?\d+\.\d+)", proc.stdout)
+        if total_energy_match:
+            total_energy = float(total_energy_match.group(1))
+            total_energy *= 627.509  # Eh -> kcal/mol
+        else:
+            raise ValueError(f"Could not find Gsolv in xTB output:\n{proc.returncode}\n{proc.stdout}\n{proc.stderr}")
+
+
 
         # Regex to extract Gsolv in Eh
         gsolv_match = re.search(r"->\s*Gsolv\s*([-+]?\d*\.\d+|\d+)\s*Eh", proc.stdout)
@@ -89,23 +98,26 @@ def get_xtb_solvation(mol: Chem.Mol, charge: int =0, num_cores: int =1) -> float
         else:
             raise ValueError(f"Could not find Gsolv in xTB output:\n{proc.returncode}\n{proc.stdout}\n{proc.stderr}")
 
-        return solvation_energy
+        return total_energy, solvation_energy
     
 
-def get_solvation_energy(mol: Chem.Mol, /, *, num_rdkit_confs: int = 10, rmsd_threshold: float | None = 0.25) -> float:
+def get_solvation_energy(mol: Chem.Mol, /, *, num_rdkit_confs: int = 50, rmsd_threshold: float | None = 0.25) -> float:
     mol = embed(Chem.AddHs(mol), num_confs=num_rdkit_confs, rmsd_threshold=rmsd_threshold)
 
     solvation_energies = []
+    total_energies = []
     for conf in mol.GetConformers():
         _mol = Chem.Mol(mol)
         _mol.RemoveAllConformers()
         _mol.AddConformer(Chem.Conformer(conf), assignId=True)
-        energy = get_xtb_solvation(_mol,num_cores=1)
-        solvation_energies.append(energy)
+        total_energy, solvation_energy = get_xtb_solvation(_mol,num_cores=1)
+        total_energies.append(total_energy)
+        solvation_energies.append(solvation_energy)
 
     solvation_energies = np.array(solvation_energies)
+    total_energies = np.array(total_energies)
 
-    solvation_energy, _ = get_boltzmann_weighted_average(properties=solvation_energies, energies=solvation_energies)
+    solvation_energy, _ = get_boltzmann_weighted_average(properties=solvation_energies, energies=total_energies)
 
     return solvation_energy
 
