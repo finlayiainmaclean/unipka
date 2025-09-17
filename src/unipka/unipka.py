@@ -35,7 +35,6 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger("unimol_free_energy.inference")
-logging.disable(50)
 
 R = 8.314  # J/mol/K
 
