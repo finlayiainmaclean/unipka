@@ -166,6 +166,7 @@ class UnipKa(object):
     def _predict(self, smiles: list[str] | str):
         if isinstance(smiles, str):
             smiles = [smiles]
+
         unimol_input = self._preprocess_data(smiles)
         dataset = MolDataset(unimol_input)
         dataloader = DataLoader(
@@ -175,14 +176,23 @@ class UnipKa(object):
             collate_fn=self.model.batch_collate_fn,
         )
 
-        results = {}
+        energies: list[float] = []
+
         for batch in dataloader:
             net_input, _ = self._decorate_torch_batch(batch)
             with torch.no_grad():
                 predictions = self.model(**net_input)
-                for smiles, energy in zip(smiles, predictions):
-                    results[smiles] = energy.item()
-        return results
+                energies.extend(e.item() for e in predictions)
+
+        # safety check
+        if len(energies) != len(smiles):
+            raise RuntimeError(
+                f"Number of predictions ({len(energies)}) "
+                f"does not match number of SMILES ({len(smiles)})"
+            )
+
+        return dict(zip(smiles, energies, strict=True))
+
 
     def _decorate_torch_batch(self, batch):
         """
@@ -229,6 +239,8 @@ class UnipKa(object):
             smi = mol
         
         macrostate_A, macrostate_B = enumerate_template(smi, self.template_a2b, self.template_b2a, mode)
+        if len(macrostate_A)==0 or len(macrostate_B)==0:
+            return np.nan
         DfGm_A = self._predict(macrostate_A)
         DfGm_B = self._predict(macrostate_B)
         return log_sum_exp(DfGm_A.values()) - log_sum_exp(DfGm_B.values()) + TRANSLATE_PH
