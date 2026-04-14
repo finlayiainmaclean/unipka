@@ -19,7 +19,8 @@ dependencies = [
     "rdkit",
     "anywidget",
     "matplotlib",
-    "scikit-learn"
+    "scikit-learn",
+    "tqdm",
 ]
 
 
