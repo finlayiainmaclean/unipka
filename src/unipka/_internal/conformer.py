@@ -119,34 +119,37 @@ def inner_mol2coords(mol: Chem.Mol, seed=42, mode="heavy", remove_hs=True):
         atoms.append(atom.GetSymbol())
         charges.append(atom.GetFormalCharge())
     assert len(atoms) > 0, f"No atoms in molecule: {label}"
-    try:
-        # will random generate conformer with seed equal to -1. else fixed random seed.
-        res = AllChem.EmbedMolecule(mol, randomSeed=seed)
-        if res == 0:
-            try:
-                # some conformer can not use MMFF optimize
-                AllChem.MMFFOptimizeMolecule(mol)
-                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-            except Exception:
-                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-        ## for fast test... ignore this ###
-        elif res == -1 and mode == "heavy":
-            AllChem.EmbedMolecule(mol, maxAttempts=5000, randomSeed=seed)
-            try:
-                # some conformer can not use MMFF optimize
-                AllChem.MMFFOptimizeMolecule(mol)
-                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-            except Exception:
+    if mol.GetNumConformers() > 0:
+        coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+    else:
+        try:
+            # will random generate conformer with seed equal to -1. else fixed random seed.
+            res = AllChem.EmbedMolecule(mol, randomSeed=seed)
+            if res == 0:
+                try:
+                    # some conformer can not use MMFF optimize
+                    AllChem.MMFFOptimizeMolecule(mol)
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+                except Exception:
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+            ## for fast test... ignore this ###
+            elif res == -1 and mode == "heavy":
+                AllChem.EmbedMolecule(mol, maxAttempts=5000, randomSeed=seed)
+                try:
+                    # some conformer can not use MMFF optimize
+                    AllChem.MMFFOptimizeMolecule(mol)
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+                except Exception:
+                    AllChem.Compute2DCoords(mol)
+                    coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
+                    coordinates = coordinates_2d
+            else:
                 AllChem.Compute2DCoords(mol)
                 coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
                 coordinates = coordinates_2d
-        else:
-            AllChem.Compute2DCoords(mol)
-            coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
-            coordinates = coordinates_2d
-    except Exception:
-        print("Failed to generate conformer, replace with zeros.")
-        coordinates = np.zeros((len(atoms), 3))
+        except Exception:
+            print("Failed to generate conformer, replace with zeros.")
+            coordinates = np.zeros((len(atoms), 3))
     assert len(atoms) == len(coordinates), f"coordinates shape is not align with {label}"
     if remove_hs:
         idx = [i for i, atom in enumerate(atoms) if atom != "H"]
