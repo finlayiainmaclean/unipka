@@ -1,4 +1,6 @@
 import logging
+from typing import Sequence, Union
+
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -11,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 class ConformerGen(object):
     """
-    This class designed to generate conformers for molecules represented as SMILES strings using provided parameters and configurations. The `transform` method uses multiprocessing to speed up the conformer generation process.
+    Generate conformers for molecules given as SMILES strings or RDKit ``Chem.Mol`` instances.
     """
 
     def __init__(self, **params):
@@ -46,17 +48,18 @@ class ConformerGen(object):
         self.charge_dictionary = Dictionary.load_from_str(DICT_CHARGE)
         self.charge_dictionary.add_symbol("[MASK]", is_special=True)
 
-    def single_process(self, smiles):
+    def single_process(self, mol_or_smi: Union[str, Chem.Mol]):
         """
-        Processes a single SMILES string to generate conformers using the specified method.
+        Processes a single molecule (SMILES string or RDKit Mol) to generate conformers.
 
-        :param smiles: (str) The SMILES string representing the molecule.
+        :param mol_or_smi: SMILES string or `Chem.Mol`.
         :return: A unimolecular data representation (dictionary) of the molecule.
         :raises ValueError: If the conformer generation method is unrecognized.
         """
         if self.method == "rdkit_random":
-            atoms, coordinates, charges = inner_smi2coords(
-                smiles, seed=self.seed, mode=self.mode, remove_hs=self.remove_hs
+            mol = Chem.MolFromSmiles(mol_or_smi) if isinstance(mol_or_smi, str) else mol_or_smi
+            atoms, coordinates, charges = inner_mol2coords(
+                mol, seed=self.seed, mode=self.mode, remove_hs=self.remove_hs
             )
             return coords2unimol(
                 atoms,
@@ -86,9 +89,9 @@ class ConformerGen(object):
             )
         return inputs
 
-    def transform(self, smiles_list):
+    def transform(self, mols_or_smis: Sequence[Union[str, Chem.Mol]]):
         logger.info("Start generating conformers...")
-        inputs = [self.single_process(item) for item in smiles_list]
+        inputs = [self.single_process(item) for item in mols_or_smis]
         failed_cnt = np.mean([(item["src_coord"] == 0.0).all() for item in inputs])
         logger.info("Succeed to generate conformers for {:.2f}% of molecules.".format((1 - failed_cnt) * 100))
         failed_3d_cnt = np.mean([(item["src_coord"][:, 2] == 0.0).all() for item in inputs])
@@ -96,63 +99,75 @@ class ConformerGen(object):
         return inputs
 
 
-def inner_smi2coords(smi, seed=42, mode="heavy", remove_hs=True):
+def inner_mol2coords(mol: Chem.Mol, seed=42, mode="heavy", remove_hs=True):
     """
-    This function is responsible for converting a SMILES (Simplified Molecular Input Line Entry System) string into 3D coordinates for each atom in the molecule. It also allows for the generation of 2D coordinates if 3D conformation generation fails, and optionally removes hydrogen atoms and their coordinates from the resulting data.
+    Convert an RDKit molecule (with implicit Hs) into 3D coordinates per atom.
 
-    :param smi: (str) The SMILES representation of the molecule.
-    :param seed: (int, optional) The random seed for conformation generation. Defaults to 42.
-    :param mode: (str, optional) The mode of conformation generation, 'fast' for quick generation, 'heavy' for more attempts. Defaults to 'fast'.
-    :param remove_hs: (bool, optional) Whether to remove hydrogen atoms from the final coordinates. Defaults to True.
+    If 3D embedding fails, may fall back to 2D coordinates. Optionally strips hydrogens.
 
-    :return: A tuple containing the list of atom symbols and their corresponding 3D coordinates.
-    :raises AssertionError: If no atoms are present in the molecule or if the coordinates do not align with the atom count.
+    :param mol: RDKit molecule (typically without explicit Hs; Hs are added internally).
+    :param seed: Random seed for conformer embedding.
+    :param mode: ``'fast'`` or ``'heavy'`` (more embed attempts on failure).
+    :param remove_hs: If True, drop hydrogen atoms from returned atom/coordinate lists.
+
+    :return: ``(atoms, coordinates, charges)``.
     """
-    mol = Chem.MolFromSmiles(smi)
-    mol = AllChem.AddHs(mol)
+    mol = AllChem.AddHs(Chem.Mol(mol))
+    label = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
     atoms, charges = [], []
     for atom in mol.GetAtoms():
         atoms.append(atom.GetSymbol())
         charges.append(atom.GetFormalCharge())
-    assert len(atoms) > 0, "No atoms in molecule: {}".format(smi)
-    try:
-        # will random generate conformer with seed equal to -1. else fixed random seed.
-        res = AllChem.EmbedMolecule(mol, randomSeed=seed)
-        if res == 0:
-            try:
-                # some conformer can not use MMFF optimize
-                AllChem.MMFFOptimizeMolecule(mol)
-                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-            except Exception:
-                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-        ## for fast test... ignore this ###
-        elif res == -1 and mode == "heavy":
-            AllChem.EmbedMolecule(mol, maxAttempts=5000, randomSeed=seed)
-            try:
-                # some conformer can not use MMFF optimize
-                AllChem.MMFFOptimizeMolecule(mol)
-                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-            except Exception:
+    assert len(atoms) > 0, f"No atoms in molecule: {label}"
+    if mol.GetNumConformers() > 0:
+        coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+    else:
+        try:
+            # will random generate conformer with seed equal to -1. else fixed random seed.
+            res = AllChem.EmbedMolecule(mol, randomSeed=seed)
+            if res == 0:
+                try:
+                    # some conformer can not use MMFF optimize
+                    AllChem.MMFFOptimizeMolecule(mol)
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+                except Exception:
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+            ## for fast test... ignore this ###
+            elif res == -1 and mode == "heavy":
+                AllChem.EmbedMolecule(mol, maxAttempts=5000, randomSeed=seed)
+                try:
+                    # some conformer can not use MMFF optimize
+                    AllChem.MMFFOptimizeMolecule(mol)
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+                except Exception:
+                    AllChem.Compute2DCoords(mol)
+                    coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
+                    coordinates = coordinates_2d
+            else:
                 AllChem.Compute2DCoords(mol)
                 coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
                 coordinates = coordinates_2d
-        else:
-            AllChem.Compute2DCoords(mol)
-            coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
-            coordinates = coordinates_2d
-    except Exception:
-        print("Failed to generate conformer, replace with zeros.")
-        coordinates = np.zeros((len(atoms), 3))
-    assert len(atoms) == len(coordinates), "coordinates shape is not align with {}".format(smi)
+        except Exception:
+            print("Failed to generate conformer, replace with zeros.")
+            coordinates = np.zeros((len(atoms), 3))
+    assert len(atoms) == len(coordinates), f"coordinates shape is not align with {label}"
     if remove_hs:
         idx = [i for i, atom in enumerate(atoms) if atom != "H"]
         atoms_no_h = [atom for atom in atoms if atom != "H"]
         coordinates_no_h = coordinates[idx]
         charges_no_h = [charges[i] for i in idx]
-        assert len(atoms_no_h) == len(coordinates_no_h), "coordinates shape is not align with {}".format(smi)
+        assert len(atoms_no_h) == len(coordinates_no_h), f"coordinates shape is not align with {label}"
         return atoms_no_h, coordinates_no_h, charges_no_h
     else:
         return atoms, coordinates, charges
+
+
+def inner_smi2coords(smi, seed=42, mode="heavy", remove_hs=True):
+    """
+    Same as :func:`inner_mol2coords` but takes a SMILES string.
+    """
+    mol = Chem.MolFromSmiles(smi)
+    return inner_mol2coords(mol, seed=seed, mode=mode, remove_hs=remove_hs)
 
 
 def inner_coords(atoms, coordinates, charges, remove_hs=True):
