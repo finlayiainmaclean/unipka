@@ -465,6 +465,86 @@ class UnipKa(object):
             out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
             return out, g_cache
 
+    def _get_ensemble_unpruned(
+        self, mol: Chem.Mol, maxiter: int = 10
+    ) -> tuple[dict[int, list[Chem.Mol]], dict[str, float]]:
+        """
+        Charge-ladder expansion like :meth:`_get_ensemble_pruned`, but without energy-based pruning.
+
+        Each ``_enumerate_template_mols`` call already stops when pools stop growing or after
+        ``maxiter`` inner iterations. The downward and upward BFS each visit at most ``maxiter``
+        new formal-charge bands; expansion stops when queues are empty (no new microstates).
+        """
+        ta, tb = self.template_a2b, self.template_b2a
+        mol0 = Chem.Mol(mol)
+        q0 = Chem.GetFormalCharge(mol0)
+        ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
+
+        m0_out, m_b1 = _enumerate_template_mols(
+            list(ensemble[q0].values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS
+        )
+        ensemble[q0] = _band_from_mols(m0_out)
+        if m_b1:
+            ensemble[q0 - 1] = _band_from_mols(m_b1)
+
+        visited_a2b: set[int] = {q0}
+        down_queue: deque[int] = deque()
+        if q0 - 1 in ensemble and ensemble[q0 - 1]:
+            down_queue.append(q0 - 1)
+        n_down = 0
+        while down_queue and n_down < maxiter:
+            q_src = down_queue.popleft()
+            if q_src in visited_a2b:
+                continue
+            band = ensemble.get(q_src)
+            if not band:
+                continue
+            visited_a2b.add(q_src)
+            n_down += 1
+            _, m_b = _enumerate_template_mols(list(band.values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS)
+            if not m_b:
+                continue
+            q_dst = q_src - 1
+            _band_merge(ensemble.setdefault(q_dst, {}), m_b)
+            down_queue.append(q_dst)
+
+        m_a1, m0_b2a = _enumerate_template_mols(
+            list(ensemble[q0].values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS
+        )
+        ensemble[q0] = _band_from_mols(m0_b2a)
+        visited_b2a: set[int] = {q0}
+        up_queue: deque[int] = deque()
+        if m_a1:
+            ensemble[q0 + 1] = _band_from_mols(m_a1)
+            up_queue.append(q0 + 1)
+
+        n_up = 0
+        while up_queue and n_up < maxiter:
+            q_src = up_queue.popleft()
+            if q_src in visited_b2a:
+                continue
+            band = ensemble.get(q_src)
+            if not band:
+                continue
+            visited_b2a.add(q_src)
+            n_up += 1
+            m_a, _ = _enumerate_template_mols(list(band.values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS)
+            if not m_a:
+                continue
+            q_dst = q_src + 1
+            _band_merge(ensemble.setdefault(q_dst, {}), m_a)
+            up_queue.append(q_dst)
+
+        out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
+        all_mols = [m for macrostate in out.values() for m in macrostate]
+        pred = self._predict(all_mols) if all_mols else {}
+        g_cache: dict[str, float] = {}
+        for m in all_mols:
+            sk = _mol_canonical_key(m)
+            if sk in pred:
+                g_cache[sk] = pred[sk]
+        return out, g_cache
+
     def _predict_ensemble_free_energy(
         self,
         mol: Chem.Mol,
@@ -481,7 +561,12 @@ class UnipKa(object):
         ensemble: dict[int, list[Chem.Mol]]
         g_cache: dict[str, float]
         for relax in range(max_charge_relaxations + 1):
-            ensemble, g_cache = self._get_ensemble_pruned(mol, w, pH)
+            try:
+                ensemble, g_cache = self._get_ensemble_pruned(mol, w, pH)
+            except EnumerationError as e:
+                logger.warning(f"Enumeration error: {e}. Retrying with unpruned ensemble.")
+                ensemble, g_cache = self._get_ensemble_unpruned(mol)
+
             if len(ensemble.keys()) >= 2:
                 break
             if relax == max_charge_relaxations:
@@ -491,7 +576,7 @@ class UnipKa(object):
                     "or a larger ensemble_energy_prune_window for this pH."
                 )
             w *= 2.0
-            logger.debug(
+            logger.info(
                 "pH-adjusted pruning left fewer than 2 charge states; retrying with window %s (relaxation %s)",
                 w,
                 relax + 1,
