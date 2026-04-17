@@ -144,17 +144,19 @@ class TestUnipKaPrivateMethods:
         assert result == float("inf")
 
     def test_get_distribution_from_free_energy(self, unipka_calc):
-        # Mock ensemble free energy data
+        # Mock ensemble free energy data (canonical SMILES, mol, ΔfG°)
         ensemble_free_energy = {
-            0: [("CCO", -5.0)],  # neutral
-            1: [("CC[OH2+]", -3.0)]  # protonated
+            0: [("CCO", Chem.MolFromSmiles("CCO"), -5.0)],  # neutral
+            1: [("CC[OH2+]", Chem.MolFromSmiles("CC[OH2+]"), -3.0)],  # protonated
         }
         df = unipka_calc._get_distribution_from_free_energy(ensemble_free_energy, pH=7.4)
         assert isinstance(df, pd.DataFrame)
         assert not df.empty
         assert 'population' in df.columns
         assert 'smiles' in df.columns
+        assert 'mol' in df.columns
         assert 'charge' in df.columns
+        assert all(isinstance(m, Chem.Mol) for m in df['mol'])
         assert np.isclose(df['population'].sum(), 1.0, atol=1e-6)
 
     def test_predict_single_molecule(self, unipka_calc):
@@ -171,6 +173,12 @@ class TestUnipKaPrivateMethods:
         assert all(mol in result for mol in molecules)
         assert all(isinstance(energy, float) for energy in result.values())
 
+    def test_predict_accepts_mol_list(self, unipka_calc):
+        mols = [Chem.MolFromSmiles("CCO"), Chem.MolFromSmiles("CCC")]
+        result = unipka_calc._predict(mols)
+        assert len(result) == 2
+        assert all(isinstance(energy, float) for energy in result.values())
+
 
 class TestUnipKaErrorHandling:
     def test_invalid_smiles(self, unipka_calc):
@@ -180,7 +188,7 @@ class TestUnipKaErrorHandling:
 
     def test_enumeration_error(self, unipka_calc):
         # Test molecule that might fail enumeration
-        simple_molecule = "C"  # methane - no ionizable groups
+        simple_molecule = Chem.MolFromSmiles("C")  # methane - no ionizable groups
         with pytest.raises(EnumerationError):
             unipka_calc._predict_ensemble_free_energy(simple_molecule)
 

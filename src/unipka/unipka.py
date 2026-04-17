@@ -1,10 +1,10 @@
-from collections import defaultdict
+from collections import defaultdict, deque
 import logging
 import math
 import os
 import sys
 import warnings
-from typing import Dict, Literal, Tuple
+from typing import Dict, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,7 +19,19 @@ from ._internal.draw import calc_base_name, draw_ensemble, get_neutral_base_name
 from ._internal.conformer import ConformerGen
 from ._internal.dataset import MolDataset
 from ._internal.model import UniMolModel
-from ._internal.template import LN10, TRANSLATE_PH, enumerate_template, get_ensemble, log_sum_exp, prot, read_template
+from ._internal.template import (
+    FILTER_PATTERNS,
+    LN10,
+    TRANSLATE_PH,
+    _band_from_mols,
+    _band_merge,
+    _enumerate_template_mols,
+    _mol_canonical_key,
+    enumerate_template,
+    log_sum_exp,
+    prot,
+    read_template,
+)
 from ._internal.coordinates import transplant_coordinates
 from ._internal.widget import Widget
 
@@ -100,7 +112,25 @@ def validate_acid_base_pair(acid_macrostate, base_macrostate):
 
 
 class UnipKa(object):
-    def __init__(self, batch_size=32, remove_hs=False, use_simple_smarts: bool = False):
+    def __init__(
+        self,
+        batch_size=32,
+        remove_hs=False,
+        use_simple_smarts: bool = False,
+        ensemble_energy_prune_window: float = 15.,
+    ):
+        """
+        :param ensemble_energy_prune_window: :meth:`_predict_ensemble_free_energy` grows the
+            protonation ensemble stepwise, predicts energies after each expansion, and drops
+            microstates whose **pH-adjusted** free energy
+            (``DfG_m + q * LN10 * (pH - TRANSLATE_PH)``, same form as in :meth:`get_distribution`)
+            is more than this value above the current global minimum among **already predicted**
+            microstates (same numeric units as ``_predict`` outputs for ``DfG_m``). The pH used is
+            the one passed into that method (e.g. ``get_distribution(..., pH=...)``), defaulting to
+            7.4 when omitted.
+            This is a **heuristic**: high-energy intermediates are removed before later enumeration,
+            so low-energy states reachable only through them may be missed.
+        """
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         model_path = get_model_path()
         pattern_path = get_pattern_path(use_simple_smarts=use_simple_smarts)
@@ -111,6 +141,7 @@ class UnipKa(object):
         self.params = {"remove_hs": remove_hs}
         self.conformer_gen = ConformerGen(**self.params)
         self.template_a2b, self.template_b2a = read_template(pattern_path)
+        self.ensemble_energy_prune_window = ensemble_energy_prune_window
 
 
     #### Internal functions ####
@@ -132,42 +163,65 @@ class UnipKa(object):
         return abs_formal_charge, abs_atoms_charges
 
     @staticmethod
-    def _get_distribution_from_free_energy(ensemble_free_energy: Dict[int, Dict[str, float]], / , *, pH: float) -> pd.DataFrame:
+    def _get_distribution_from_free_energy(
+        ensemble_free_energy: dict[int, list[tuple[str, Chem.Mol, float]]], /, *, pH: float
+    ) -> pd.DataFrame:
         ensemble_boltzmann_factor = defaultdict(list)
         partition_function = 0
         for q, macrostate_free_energy in ensemble_free_energy.items():
-            for microstate, DfGm in macrostate_free_energy:
+            for microstate_smi, microstate_mol, DfGm in macrostate_free_energy:
                 boltzmann_factor = math.exp(-DfGm - q * LN10 * (pH - TRANSLATE_PH))
                 partition_function += boltzmann_factor
-                ensemble_boltzmann_factor[q].append((microstate, boltzmann_factor))
-        
-        # Create lists for DataFrame columns
+                ensemble_boltzmann_factor[q].append(
+                    (microstate_smi, microstate_mol, boltzmann_factor)
+                )
+
         fractions = []
-        microstates = []
+        smiles_list = []
+        mols_list = []
         charges = []
-        
+
         for q, macrostate_boltzmann_factor in ensemble_boltzmann_factor.items():
-            for microstate, boltzmann_factor in macrostate_boltzmann_factor:
+            for microstate_smi, microstate_mol, boltzmann_factor in macrostate_boltzmann_factor:
                 fraction = boltzmann_factor / partition_function
                 fractions.append(fraction)
-                microstates.append(microstate)
+                smiles_list.append(microstate_smi)
+                mols_list.append(Chem.Mol(microstate_mol))
                 charges.append(q)
-        
-        return pd.DataFrame({
-            'population': fractions,
-            'smiles': microstates,
-            'charge': charges
-        })
+
+        return pd.DataFrame(
+            {
+                "population": fractions,
+                "smiles": smiles_list,
+                "mol": mols_list,
+                "charge": charges,
+            }
+        )
     
-    def _preprocess_data(self, smiles_list):
-        inputs = self.conformer_gen.transform(smiles_list)
-        return inputs
+    def _preprocess_data(self, mols_or_smis: list[str] | list[Chem.Mol]):
+        return self.conformer_gen.transform(mols_or_smis)
 
-    def _predict(self, smiles: list[str] | str):
-        if isinstance(smiles, str):
-            smiles = [smiles]
+    @staticmethod
+    def _as_mol_list(mols: str | Chem.Mol | list[str] | list[Chem.Mol]) -> tuple[list[Chem.Mol], list[str]]:
+        if isinstance(mols, Chem.Mol):
+            mol_list = [mols]
+        elif isinstance(mols, str):
+            mol_list = [Chem.MolFromSmiles(mols)]
+        elif isinstance(mols, list):
+            if not mols:
+                raise ValueError("_predict requires a non-empty list")
+            if isinstance(mols[0], Chem.Mol):
+                mol_list = list(mols)
+            else:
+                mol_list = [Chem.MolFromSmiles(s) for s in mols]
+      
+        smiles = [Chem.MolToSmiles(m, canonical=True, isomericSmiles=True) for m in mol_list]
+        return mol_list, smiles
 
-        unimol_input = self._preprocess_data(smiles)
+    def _predict(self, mols: str | Chem.Mol | list[str] | list[Chem.Mol]):
+        mol_list, smiles = self._as_mol_list(mols)
+
+        unimol_input = self._preprocess_data(mol_list)
         dataset = MolDataset(unimol_input)
         dataloader = DataLoader(
             dataset,
@@ -184,11 +238,10 @@ class UnipKa(object):
                 predictions = self.model(**net_input)
                 energies.extend(e.item() for e in predictions)
 
-        # safety check
         if len(energies) != len(smiles):
             raise RuntimeError(
                 f"Number of predictions ({len(energies)}) "
-                f"does not match number of SMILES ({len(smiles)})"
+                f"does not match number of inputs ({len(smiles)})"
             )
 
         return dict(zip(smiles, energies, strict=True))
@@ -212,24 +265,17 @@ class UnipKa(object):
         return net_input, net_target
 
     def _predict_micro_pKa(self, mol: Chem.Mol | str, /, *, idx: int, mode: Literal["a2b", "b2a"]):
-
-        if isinstance(mol, Chem.Mol):
-            smi = Chem.MolToSmiles(mol)
-        else:
-            smi = mol
-
-        mol = Chem.MolFromSmiles(smi)
+        if isinstance(mol, str):
+            mol = Chem.MolFromSmiles(mol)
         new_mol = Chem.RemoveHs(prot(mol, idx, mode))
-        new_smi = Chem.MolToSmiles(new_mol)
         if mode == "a2b":
-            smi_A = smi
-            smi_B = new_smi
-        elif mode == "b2a":
-            smi_B = smi
-            smi_A = new_smi
-        DfGm = self._predict([smi_A, smi_B])
-        pKa = (DfGm[smi_B] - DfGm[smi_A]) / LN10 + TRANSLATE_PH
-        return pKa
+            mol_a, mol_b = mol, new_mol
+        else:
+            mol_b, mol_a = mol, new_mol
+        DfGm = self._predict([mol_a, mol_b])
+        key_a = Chem.MolToSmiles(mol_a, canonical=True, isomericSmiles=True)
+        key_b = Chem.MolToSmiles(mol_b, canonical=True, isomericSmiles=True)
+        return (DfGm[key_b] - DfGm[key_a]) / LN10 + TRANSLATE_PH
 
     def _predict_macro_pKa(self, mol: Chem.Mol | str, /, *, mode: Literal["a2b", "b2a"]) -> float:
 
@@ -245,24 +291,222 @@ class UnipKa(object):
         DfGm_B = self._predict(macrostate_B)
         return log_sum_exp(DfGm_A.values()) - log_sum_exp(DfGm_B.values()) + TRANSLATE_PH
 
+    def _predict_pending_pruned_bands(
+        self,
+        ensemble: dict[int, dict[str, Chem.Mol]],
+        g_cache: dict[str, float],
+        q_cache: dict[str, int],
+    ) -> None:
+        pending: list[Chem.Mol] = []
+        pending_q: list[int] = []
+        for q, band in ensemble.items():
+            for k, m in band.items():
+                if k not in g_cache:
+                    pending.append(m)
+                    pending_q.append(q)
+        if not pending:
+            return
+        pred = self._predict(pending)
+        for m, q in zip(pending, pending_q, strict=True):
+            sk = _mol_canonical_key(m)
+            if sk in pred:
+                g_cache[sk] = pred[sk]
+                q_cache[sk] = q
 
-    def _predict_ensemble_free_energy(self, smi: str) -> Dict[int, Tuple[str, float]]:
-        
-        ensemble = get_ensemble(smi, self.template_a2b, self.template_b2a)
+    @staticmethod
+    def _ph_adjusted_free_energy(DfGm: float, q: int, pH: float) -> float:
+        return DfGm + q * LN10 * (pH - TRANSLATE_PH)
 
-        if len(ensemble.keys())<2:
-                raise EnumerationError(f"Failed to enumerate microstates across 2 charge states for {smi}. "
-                                       "Try enumerating manually and calling `get_macro_pka_from_macrostates`")
+    def _prune_ensemble_bands(
+        self,
+        ensemble: dict[int, dict[str, Chem.Mol]],
+        g_cache: dict[str, float],
+        q_cache: dict[str, int],
+        window: float,
+        pH: float,
+    ) -> None:
+        if not g_cache:
+            return
+        cutoff = min(self._ph_adjusted_free_energy(g_cache[k], q_cache[k], pH) for k in g_cache) + window
+        for q in list(ensemble.keys()):
+            band = ensemble[q]
+            for k in list(band.keys()):
+                g = g_cache.get(k)
+                if g is None or k not in q_cache:
+                    continue
+                if self._ph_adjusted_free_energy(g, q, pH) > cutoff:
+                    del band[k]
+            if not band:
+                del ensemble[q]
 
-        
-        ensemble_free_energy = dict()
+    def _get_ensemble_pruned(
+        self, mol: Chem.Mol, energy_window: float, pH: float, maxiter: int = 10
+    ) -> tuple[dict[int, list[Chem.Mol]], dict[str, float]]:
+        """
+        Same charge-ladder expansion as ``get_ensemble``, but after each merge step we predict
+        new microstates and drop those more than ``energy_window`` above the current global minimum
+        **pH-adjusted** free energy (``DfG_m + q * LN10 * (pH - TRANSLATE_PH)``)
+        among microstates seen so far.
+
+        If pruning removes every microstate at the query formal charge, the effective window is
+        doubled and the expansion is restarted from the input molecule (up to a fixed number of
+        relaxations), instead of failing immediately.
+        """
+        w = float(energy_window)
+        if w <= 0:
+            w = 1.0
+        max_prune_relaxations = 64
+        n_relax = 0
+        ta, tb = self.template_a2b, self.template_b2a
+
+        while True:
+            mol0 = Chem.Mol(mol)
+            q0 = Chem.GetFormalCharge(mol0)
+            ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
+            g_cache: dict[str, float] = {}
+            q_cache: dict[str, int] = {}
+
+            def predict_and_prune() -> None:
+                self._predict_pending_pruned_bands(ensemble, g_cache, q_cache)
+                self._prune_ensemble_bands(ensemble, g_cache, q_cache, w, pH)
+
+            predict_and_prune()
+            if q0 not in ensemble or not ensemble[q0]:
+                n_relax += 1
+                if n_relax > max_prune_relaxations:
+                    raise EnumerationError(
+                        "Pruning removed all microstates at the reference charge even after "
+                        f"widening the energy window up to {w:g}. "
+                        "Try a larger ensemble_energy_prune_window."
+                    )
+                w *= 2.0
+                logger.debug(
+                    "Pruning emptied reference charge; retrying with prune window %s (relaxation %s)",
+                    w,
+                    n_relax,
+                )
+                continue
+
+            m0_out, m_b1 = _enumerate_template_mols(
+                list(ensemble[q0].values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS
+            )
+            ensemble[q0] = _band_from_mols(m0_out)
+            if m_b1:
+                ensemble[q0 - 1] = _band_from_mols(m_b1)
+            predict_and_prune()
+
+            visited_a2b: set[int] = {q0}
+            down_queue: deque[int] = deque()
+            if q0 - 1 in ensemble and ensemble[q0 - 1]:
+                down_queue.append(q0 - 1)
+            n_down = 0
+            while down_queue and n_down < maxiter:
+                q_src = down_queue.popleft()
+                if q_src in visited_a2b:
+                    continue
+                band = ensemble.get(q_src)
+                if not band:
+                    continue
+                visited_a2b.add(q_src)
+                n_down += 1
+                _, m_b = _enumerate_template_mols(list(band.values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS)
+                if not m_b:
+                    continue
+                q_dst = q_src - 1
+                _band_merge(ensemble.setdefault(q_dst, {}), m_b)
+                down_queue.append(q_dst)
+                predict_and_prune()
+
+            if q0 not in ensemble or not ensemble[q0]:
+                n_relax += 1
+                if n_relax > max_prune_relaxations:
+                    raise EnumerationError(
+                        "Pruning removed all microstates at the reference charge before the b2a pass, "
+                        f"even after widening the energy window up to {w:g}. "
+                        "Try a larger ensemble_energy_prune_window."
+                    )
+                w *= 2.0
+                logger.debug(
+                    "Pruning emptied reference charge before b2a; retrying with prune window %s (relaxation %s)",
+                    w,
+                    n_relax,
+                )
+                continue
+
+            m_a1, m0_b2a = _enumerate_template_mols(
+                list(ensemble[q0].values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS
+            )
+            ensemble[q0] = _band_from_mols(m0_b2a)
+            visited_b2a: set[int] = {q0}
+            up_queue: deque[int] = deque()
+            if m_a1:
+                ensemble[q0 + 1] = _band_from_mols(m_a1)
+                up_queue.append(q0 + 1)
+            predict_and_prune()
+
+            n_up = 0
+            while up_queue and n_up < maxiter:
+                q_src = up_queue.popleft()
+                if q_src in visited_b2a:
+                    continue
+                band = ensemble.get(q_src)
+                if not band:
+                    continue
+                visited_b2a.add(q_src)
+                n_up += 1
+                m_a, _ = _enumerate_template_mols(list(band.values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS)
+                if not m_a:
+                    continue
+                q_dst = q_src + 1
+                _band_merge(ensemble.setdefault(q_dst, {}), m_a)
+                up_queue.append(q_dst)
+                predict_and_prune()
+
+            out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
+            return out, g_cache
+
+    def _predict_ensemble_free_energy(
+        self,
+        mol: Chem.Mol,
+        *,
+        prune_window: Optional[float] = None,
+        pH: float = 7.4,
+    ) -> tuple[dict[int, list[Chem.Mol]], dict[int, list[tuple[str, Chem.Mol, float]]]]:
+        """``pH`` is used for pH-adjusted pruning only; returned ``DfG_m`` values are unchanged."""
+        window = self.ensemble_energy_prune_window if prune_window is None else prune_window
+        query_smi = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
+
+        w = float(window)
+        max_charge_relaxations = 32
+        ensemble: dict[int, list[Chem.Mol]]
+        g_cache: dict[str, float]
+        for relax in range(max_charge_relaxations + 1):
+            ensemble, g_cache = self._get_ensemble_pruned(mol, w, pH)
+            if len(ensemble.keys()) >= 2:
+                break
+            if relax == max_charge_relaxations:
+                raise EnumerationError(
+                    f"Failed to enumerate microstates across 2 charge states for {query_smi}. "
+                    "Try enumerating manually and calling `get_macro_pka_from_macrostates`, "
+                    "or a larger ensemble_energy_prune_window for this pH."
+                )
+            w *= 2.0
+            logger.debug(
+                "pH-adjusted pruning left fewer than 2 charge states; retrying with window %s (relaxation %s)",
+                w,
+                relax + 1,
+            )
+
+        ensemble_free_energy: dict[int, list[tuple[str, Chem.Mol, float]]] = {}
         for q, macrostate in ensemble.items():
-            prediction = self._predict(macrostate)
-            _ensemble_free_energy = []
-            for microstate in macrostate:
-                if microstate in prediction:
-                    _ensemble_free_energy.append((microstate, prediction[microstate]))
-            ensemble_free_energy[q] = _ensemble_free_energy
+            row: list[tuple[str, Chem.Mol, float]] = []
+            for m in macrostate:
+                s = _mol_canonical_key(m)
+                if s not in g_cache:
+                    logger.warning("Missing cached energy for %s at charge %s after pruned ensemble", s, q)
+                    continue
+                row.append((s, Chem.Mol(m), g_cache[s]))
+            ensemble_free_energy[q] = row
 
         if len(ensemble_free_energy) == 0:
             raise ValueError("Could not process any microstates")
@@ -311,20 +555,18 @@ class UnipKa(object):
         if isinstance(mol, str):
             mol = Chem.MolFromSmiles(mol)
 
-        query_smi = Chem.CanonSmiles(Chem.MolToSmiles(mol))
 
         # Free energy predictions from your model, grouped by charge
-        ensemble, ensemble_free_energy = self._predict_ensemble_free_energy(query_smi)
-
+        ensemble, ensemble_free_energy = self._predict_ensemble_free_energy(mol)
 
         pHs = np.linspace(0, 14, 1000)
         fractions = defaultdict(list)
         name_mapping = dict()
-        neutral_base_name = get_neutral_base_name(ensemble_free_energy)
+        neutral_base_name = get_neutral_base_name(ensemble)
 
         for q, macrostate in ensemble_free_energy.items():
-            for i, (microstate, _) in enumerate(macrostate):
-                name_mapping[microstate] = f"{i+1}-{calc_base_name(neutral_base_name, q)}"
+            for i, (microstate_smi, _microstate_mol, _dg) in enumerate(macrostate):
+                name_mapping[microstate_smi] = f"{i+1}-{calc_base_name(neutral_base_name, q)}"
         distribution_dfs = []
         for pH in pHs:
             distribution_df = self._get_distribution_from_free_energy(ensemble_free_energy, pH=pH)
@@ -361,25 +603,25 @@ class UnipKa(object):
         if isinstance(mol, str):
             mol = Chem.MolFromSmiles(mol)
 
-        query_smi = Chem.CanonSmiles(Chem.MolToSmiles(mol))
 
         # Free energy predictions from your model, grouped by charge
-        _, ensemble_free_energy = self._predict_ensemble_free_energy(query_smi)
+        _, ensemble_free_energy = self._predict_ensemble_free_energy(mol, pH=pH)
 
         records = []
         partition_function = 0.0
 
         # Collect Boltzmann weights and energy terms
         for q, macrostate_free_energy in ensemble_free_energy.items():
-            for microstate_smi, DfGm in macrostate_free_energy:
-                G_pH = DfGm + q * LN10 * (pH - TRANSLATE_PH)  # pH-adjusted free energy
+            for microstate_smi, microstate_mol, DfGm in macrostate_free_energy:
+                G_pH = self._ph_adjusted_free_energy(DfGm, q, pH)
                 boltzmann_factor = math.exp(-G_pH)
-                records.append((q, microstate_smi, DfGm, G_pH, boltzmann_factor))
+                records.append((q, microstate_smi, microstate_mol, DfGm, G_pH, boltzmann_factor))
                 partition_function += boltzmann_factor
 
         # Normalize to get population w_i(pH)
         df = pd.DataFrame(
-            records, columns=["charge", "smiles", "free_energy", "ph_adjusted_free_energy", "boltzmann_factor"]
+            records,
+            columns=["charge", "smiles", "mol", "free_energy", "ph_adjusted_free_energy", "boltzmann_factor"],
         )
 
         df["relative_ph_adjusted_free_energy"] = df.ph_adjusted_free_energy - df.ph_adjusted_free_energy.min()
@@ -389,11 +631,8 @@ class UnipKa(object):
         # Sort for readability
         df = df.sort_values(by="population", ascending=False).reset_index(drop=True)
 
-        # Optional: add mol objects and coordinate mapping
-        df["mol"] = df.smiles.apply(Chem.MolFromSmiles)
-
         if mol.GetNumConformers() > 0:
-            df["mol"] = df.mol.apply(lambda x: transplant_coordinates(mol, x))  # if you have this
+            df["mol"] = df["mol"].apply(lambda x: transplant_coordinates(mol, x))
         df["is_query_mol"] = df["mol"].apply(lambda x: _same_mol(mol, x))
 
         return df
@@ -528,10 +767,8 @@ class UnipKa(object):
         if isinstance(mol, str):
             mol = Chem.MolFromSmiles(mol)
 
-        query_smi = Chem.CanonSmiles(Chem.MolToSmiles(mol))
-
         # Free energy predictions from your model, grouped by charge
-        _, ensemble_free_energy = self._predict_ensemble_free_energy(query_smi)
+        _, ensemble_free_energy = self._predict_ensemble_free_energy(mol)
 
         pHs = np.linspace(0, 14, 1000)
    
