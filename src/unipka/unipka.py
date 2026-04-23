@@ -117,19 +117,18 @@ class UnipKa(object):
         batch_size=32,
         remove_hs=False,
         use_simple_smarts: bool = False,
-        ensemble_energy_prune_window: float = 15.,
+        beam_width: Optional[int] = 20,
+        charge_limits: Optional[Tuple[int, int]] = (-2, 2),
     ):
         """
-        :param ensemble_energy_prune_window: :meth:`_predict_ensemble_free_energy` grows the
-            protonation ensemble stepwise, predicts energies after each expansion, and drops
-            microstates whose **pH-adjusted** free energy
-            (``DfG_m + q * LN10 * (pH - TRANSLATE_PH)``, same form as in :meth:`get_distribution`)
-            is more than this value above the current global minimum among **already predicted**
-            microstates (same numeric units as ``_predict`` outputs for ``DfG_m``). The pH used is
-            the one passed into that method (e.g. ``get_distribution(..., pH=...)``), defaulting to
-            7.4 when omitted.
-            This is a **heuristic**: high-energy intermediates are removed before later enumeration,
-            so low-energy states reachable only through them may be missed.
+        :param ensemble_beam_width: After each scoring step, at each formal charge ``q`` the
+            merged pool is reduced to at most this many microstates with lowest model ``DfG_m``
+            (``None`` keeps every microstate that passed template enumeration and charge clipping).
+
+        :param ensemble_formal_charge_limits: ``(q_min, q_max)`` inclusive bounds on total
+            molecular formal charge during enumeration. The interval is widened if needed so the
+            input molecule's charge is always included. ``None`` disables this clipping (legacy
+            behaviour: only ``maxiter`` bounds the charge ladder).
         """
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         model_path = get_model_path()
@@ -141,7 +140,8 @@ class UnipKa(object):
         self.params = {"remove_hs": remove_hs}
         self.conformer_gen = ConformerGen(**self.params)
         self.template_a2b, self.template_b2a = read_template(pattern_path)
-        self.ensemble_energy_prune_window = ensemble_energy_prune_window
+        self.beam_width = beam_width
+        self.charge_limits = charge_limits
 
 
     #### Internal functions ####
@@ -317,179 +317,94 @@ class UnipKa(object):
     def _ph_adjusted_free_energy(DfGm: float, q: int, pH: float) -> float:
         return DfGm + q * LN10 * (pH - TRANSLATE_PH)
 
-    def _prune_ensemble_bands(
+    @staticmethod
+    def _effective_formal_charge_limits(q0: int, limits: Tuple[int, int]) -> tuple[int, int]:
+        lo, hi = limits
+        if lo > hi:
+            lo, hi = hi, lo
+        return min(lo, q0), max(hi, q0)
+
+    @staticmethod
+    def _clip_ensemble_charge_range(
+        ensemble: dict[int, dict[str, Chem.Mol]], q_lo: int, q_hi: int
+    ) -> None:
+        for q in list(ensemble.keys()):
+            if q < q_lo or q > q_hi:
+                del ensemble[q]
+
+    def _beam_prune_ensemble_bands(
         self,
         ensemble: dict[int, dict[str, Chem.Mol]],
         g_cache: dict[str, float],
-        q_cache: dict[str, int],
-        window: float,
-        pH: float,
+        beam_width: int,
     ) -> None:
-        if not g_cache:
+        """Keep at most ``beam_width`` lowest-``DfG_m`` microstates per formal charge (paper beam)."""
+        if beam_width <= 0:
             return
-        cutoff = min(self._ph_adjusted_free_energy(g_cache[k], q_cache[k], pH) for k in g_cache) + window
         for q in list(ensemble.keys()):
             band = ensemble[q]
+            scored = [(k, g_cache[k]) for k in band if k in g_cache]
+            unscored = [k for k in band if k not in g_cache]
+            scored.sort(key=lambda kv: kv[1])
+            keep = {k for k, _ in scored[:beam_width]}
+            keep.update(unscored)
             for k in list(band.keys()):
-                g = g_cache.get(k)
-                if g is None or k not in q_cache:
-                    continue
-                if self._ph_adjusted_free_energy(g, q, pH) > cutoff:
+                if k not in keep:
                     del band[k]
             if not band:
                 del ensemble[q]
 
     def _get_ensemble_pruned(
-        self, mol: Chem.Mol, energy_window: float, pH: float, maxiter: int = 10
-    ) -> tuple[dict[int, list[Chem.Mol]], dict[str, float]]:
-        """
-        Same charge-ladder expansion as ``get_ensemble``, but after each merge step we predict
-        new microstates and drop those more than ``energy_window`` above the current global minimum
-        **pH-adjusted** free energy (``DfG_m + q * LN10 * (pH - TRANSLATE_PH)``)
-        among microstates seen so far.
-
-        If pruning removes every microstate at the query formal charge, the effective window is
-        doubled and the expansion is restarted from the input molecule (up to a fixed number of
-        relaxations), instead of failing immediately.
-        """
-        w = float(energy_window)
-        if w <= 0:
-            w = 1.0
-        max_prune_relaxations = 64
-        n_relax = 0
-        ta, tb = self.template_a2b, self.template_b2a
-
-        while True:
-            mol0 = Chem.Mol(mol)
-            q0 = Chem.GetFormalCharge(mol0)
-            ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
-            g_cache: dict[str, float] = {}
-            q_cache: dict[str, int] = {}
-
-            def predict_and_prune() -> None:
-                self._predict_pending_pruned_bands(ensemble, g_cache, q_cache)
-                self._prune_ensemble_bands(ensemble, g_cache, q_cache, w, pH)
-
-            predict_and_prune()
-            if q0 not in ensemble or not ensemble[q0]:
-                n_relax += 1
-                if n_relax > max_prune_relaxations:
-                    raise EnumerationError(
-                        "Pruning removed all microstates at the reference charge even after "
-                        f"widening the energy window up to {w:g}. "
-                        "Try a larger ensemble_energy_prune_window."
-                    )
-                w *= 2.0
-                logger.debug(
-                    "Pruning emptied reference charge; retrying with prune window %s (relaxation %s)",
-                    w,
-                    n_relax,
-                )
-                continue
-
-            m0_out, m_b1 = _enumerate_template_mols(
-                list(ensemble[q0].values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS
-            )
-            ensemble[q0] = _band_from_mols(m0_out)
-            if m_b1:
-                ensemble[q0 - 1] = _band_from_mols(m_b1)
-            predict_and_prune()
-
-            visited_a2b: set[int] = {q0}
-            down_queue: deque[int] = deque()
-            if q0 - 1 in ensemble and ensemble[q0 - 1]:
-                down_queue.append(q0 - 1)
-            n_down = 0
-            while down_queue and n_down < maxiter:
-                q_src = down_queue.popleft()
-                if q_src in visited_a2b:
-                    continue
-                band = ensemble.get(q_src)
-                if not band:
-                    continue
-                visited_a2b.add(q_src)
-                n_down += 1
-                _, m_b = _enumerate_template_mols(list(band.values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS)
-                if not m_b:
-                    continue
-                q_dst = q_src - 1
-                _band_merge(ensemble.setdefault(q_dst, {}), m_b)
-                down_queue.append(q_dst)
-                predict_and_prune()
-
-            if q0 not in ensemble or not ensemble[q0]:
-                n_relax += 1
-                if n_relax > max_prune_relaxations:
-                    raise EnumerationError(
-                        "Pruning removed all microstates at the reference charge before the b2a pass, "
-                        f"even after widening the energy window up to {w:g}. "
-                        "Try a larger ensemble_energy_prune_window."
-                    )
-                w *= 2.0
-                logger.debug(
-                    "Pruning emptied reference charge before b2a; retrying with prune window %s (relaxation %s)",
-                    w,
-                    n_relax,
-                )
-                continue
-
-            m_a1, m0_b2a = _enumerate_template_mols(
-                list(ensemble[q0].values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS
-            )
-            ensemble[q0] = _band_from_mols(m0_b2a)
-            visited_b2a: set[int] = {q0}
-            up_queue: deque[int] = deque()
-            if m_a1:
-                ensemble[q0 + 1] = _band_from_mols(m_a1)
-                up_queue.append(q0 + 1)
-            predict_and_prune()
-
-            n_up = 0
-            while up_queue and n_up < maxiter:
-                q_src = up_queue.popleft()
-                if q_src in visited_b2a:
-                    continue
-                band = ensemble.get(q_src)
-                if not band:
-                    continue
-                visited_b2a.add(q_src)
-                n_up += 1
-                m_a, _ = _enumerate_template_mols(list(band.values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS)
-                if not m_a:
-                    continue
-                q_dst = q_src + 1
-                _band_merge(ensemble.setdefault(q_dst, {}), m_a)
-                up_queue.append(q_dst)
-                predict_and_prune()
-
-            out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
-            return out, g_cache
-
-    def _get_ensemble_unpruned(
         self, mol: Chem.Mol, maxiter: int = 10
     ) -> tuple[dict[int, list[Chem.Mol]], dict[str, float]]:
         """
-        Charge-ladder expansion like :meth:`_get_ensemble_pruned`, but without energy-based pruning.
+        Charge-ladder expansion as in :func:`~unipka._internal.template.get_ensemble`, with:
 
-        Each ``_enumerate_template_mols`` call already stops when pools stop growing or after
-        ``maxiter`` inner iterations. The downward and upward BFS each visit at most ``maxiter``
-        new formal-charge bands; expansion stops when queues are empty (no new microstates).
+        - **Formal-charge window** from ``ensemble_formal_charge_limits`` (widened to include
+          the input charge), so expansion does not leave that range.
+
+        - After each expansion, microstates are scored with the model, then **beam search**
+          (``ensemble_beam_width``): at each charge, keep at most that many microstates with
+          lowest ``DfG_m``.
         """
         ta, tb = self.template_a2b, self.template_b2a
         mol0 = Chem.Mol(mol)
         q0 = Chem.GetFormalCharge(mol0)
+        lim = self.charge_limits
+        if lim is None:
+            q_lo, q_hi = -10**9, 10**9
+        else:
+            q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
         ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
+        g_cache: dict[str, float] = {}
+        q_cache: dict[str, int] = {}
+
+        def predict_and_prune() -> None:
+            self._predict_pending_pruned_bands(ensemble, g_cache, q_cache)
+            bw = self.beam_width
+            if bw is not None:
+                self._beam_prune_ensemble_bands(ensemble, g_cache, bw)
+            if lim is not None:
+                self._clip_ensemble_charge_range(ensemble, q_lo, q_hi)
+
+        predict_and_prune()
+        if q0 not in ensemble or not ensemble[q0]:
+            raise EnumerationError(
+                "Beam selection removed all microstates at the input formal charge. "
+                "Try ``ensemble_beam_width=None`` or a larger value."
+            )
 
         m0_out, m_b1 = _enumerate_template_mols(
             list(ensemble[q0].values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS
         )
         ensemble[q0] = _band_from_mols(m0_out)
-        if m_b1:
+        if m_b1 and q_lo <= (q0 - 1) <= q_hi:
             ensemble[q0 - 1] = _band_from_mols(m_b1)
+        predict_and_prune()
 
         visited_a2b: set[int] = {q0}
         down_queue: deque[int] = deque()
-        if q0 - 1 in ensemble and ensemble[q0 - 1]:
+        if q_lo <= (q0 - 1) <= q_hi and q0 - 1 in ensemble and ensemble[q0 - 1]:
             down_queue.append(q0 - 1)
         n_down = 0
         while down_queue and n_down < maxiter:
@@ -505,6 +420,103 @@ class UnipKa(object):
             if not m_b:
                 continue
             q_dst = q_src - 1
+            if q_dst < q_lo:
+                continue
+            _band_merge(ensemble.setdefault(q_dst, {}), m_b)
+            down_queue.append(q_dst)
+            predict_and_prune()
+
+        if q0 not in ensemble or not ensemble[q0]:
+            raise EnumerationError(
+                "Beam selection removed all microstates at the input formal charge before the "
+                "b2a pass. Try ``ensemble_beam_width=None`` or a larger value."
+            )
+
+        m_a1, m0_b2a = _enumerate_template_mols(
+            list(ensemble[q0].values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS
+        )
+        ensemble[q0] = _band_from_mols(m0_b2a)
+        visited_b2a: set[int] = {q0}
+        up_queue: deque[int] = deque()
+        if m_a1 and q_lo <= (q0 + 1) <= q_hi:
+            ensemble[q0 + 1] = _band_from_mols(m_a1)
+            up_queue.append(q0 + 1)
+        predict_and_prune()
+
+        n_up = 0
+        while up_queue and n_up < maxiter:
+            q_src = up_queue.popleft()
+            if q_src in visited_b2a:
+                continue
+            band = ensemble.get(q_src)
+            if not band:
+                continue
+            visited_b2a.add(q_src)
+            n_up += 1
+            m_a, _ = _enumerate_template_mols(list(band.values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS)
+            if not m_a:
+                continue
+            q_dst = q_src + 1
+            if q_dst > q_hi:
+                continue
+            _band_merge(ensemble.setdefault(q_dst, {}), m_a)
+            up_queue.append(q_dst)
+            predict_and_prune()
+
+        out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
+        return out, g_cache
+
+    def _get_ensemble_unpruned(
+        self, mol: Chem.Mol, maxiter: int = 10
+    ) -> tuple[dict[int, list[Chem.Mol]], dict[str, float]]:
+        """
+        Charge-ladder expansion like :meth:`_get_ensemble_pruned`, but without incremental
+        scoring or per-charge beam pruning (full enumeration, single batched ``_predict`` at the end).
+
+        Each ``_enumerate_template_mols`` call already stops when pools stop growing or after
+        ``maxiter`` inner iterations. The downward and upward BFS each visit at most ``maxiter``
+        new formal-charge bands; expansion stops when queues are empty (no new microstates).
+
+        Formal-charge bounds match :meth:`_get_ensemble_pruned` (``ensemble_formal_charge_limits``,
+        widened to include the input charge).
+        """
+        ta, tb = self.template_a2b, self.template_b2a
+        mol0 = Chem.Mol(mol)
+        q0 = Chem.GetFormalCharge(mol0)
+        lim = self.charge_limits
+        if lim is None:
+            q_lo, q_hi = -10**9, 10**9
+        else:
+            q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
+        ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
+
+        m0_out, m_b1 = _enumerate_template_mols(
+            list(ensemble[q0].values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS
+        )
+        ensemble[q0] = _band_from_mols(m0_out)
+        if m_b1 and q_lo <= (q0 - 1) <= q_hi:
+            ensemble[q0 - 1] = _band_from_mols(m_b1)
+
+        visited_a2b: set[int] = {q0}
+        down_queue: deque[int] = deque()
+        if q_lo <= (q0 - 1) <= q_hi and q0 - 1 in ensemble and ensemble[q0 - 1]:
+            down_queue.append(q0 - 1)
+        n_down = 0
+        while down_queue and n_down < maxiter:
+            q_src = down_queue.popleft()
+            if q_src in visited_a2b:
+                continue
+            band = ensemble.get(q_src)
+            if not band:
+                continue
+            visited_a2b.add(q_src)
+            n_down += 1
+            _, m_b = _enumerate_template_mols(list(band.values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS)
+            if not m_b:
+                continue
+            q_dst = q_src - 1
+            if q_dst < q_lo:
+                continue
             _band_merge(ensemble.setdefault(q_dst, {}), m_b)
             down_queue.append(q_dst)
 
@@ -514,7 +526,7 @@ class UnipKa(object):
         ensemble[q0] = _band_from_mols(m0_b2a)
         visited_b2a: set[int] = {q0}
         up_queue: deque[int] = deque()
-        if m_a1:
+        if m_a1 and q_lo <= (q0 + 1) <= q_hi:
             ensemble[q0 + 1] = _band_from_mols(m_a1)
             up_queue.append(q0 + 1)
 
@@ -532,6 +544,8 @@ class UnipKa(object):
             if not m_a:
                 continue
             q_dst = q_src + 1
+            if q_dst > q_hi:
+                continue
             _band_merge(ensemble.setdefault(q_dst, {}), m_a)
             up_queue.append(q_dst)
 
@@ -548,38 +562,23 @@ class UnipKa(object):
     def _predict_ensemble_free_energy(
         self,
         mol: Chem.Mol,
-        *,
-        prune_window: Optional[float] = None,
-        pH: float = 7.4,
     ) -> tuple[dict[int, list[Chem.Mol]], dict[int, list[tuple[str, Chem.Mol, float]]]]:
-        """``pH`` is used for pH-adjusted pruning only; returned ``DfG_m`` values are unchanged."""
-        window = self.ensemble_energy_prune_window if prune_window is None else prune_window
+        """Enumerate microstates with per-charge beam pruning; returned ``DfG_m`` values are raw model outputs."""
         query_smi = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
 
-        w = float(window)
-        max_charge_relaxations = 32
         ensemble: dict[int, list[Chem.Mol]]
         g_cache: dict[str, float]
-        for relax in range(max_charge_relaxations + 1):
-            try:
-                ensemble, g_cache = self._get_ensemble_pruned(mol, w, pH)
-            except EnumerationError as e:
-                logger.warning(f"Enumeration error: {e}. Retrying with unpruned ensemble.")
-                ensemble, g_cache = self._get_ensemble_unpruned(mol)
+        try:
+            ensemble, g_cache = self._get_ensemble_pruned(mol)
+        except EnumerationError as e:
+            logger.warning(f"Enumeration error: {e}. Retrying with unpruned ensemble.")
+            ensemble, g_cache = self._get_ensemble_unpruned(mol)
 
-            if len(ensemble.keys()) >= 2:
-                break
-            if relax == max_charge_relaxations:
-                raise EnumerationError(
-                    f"Failed to enumerate microstates across 2 charge states for {query_smi}. "
-                    "Try enumerating manually and calling `get_macro_pka_from_macrostates`, "
-                    "or a larger ensemble_energy_prune_window for this pH."
-                )
-            w *= 2.0
-            logger.info(
-                "pH-adjusted pruning left fewer than 2 charge states; retrying with window %s (relaxation %s)",
-                w,
-                relax + 1,
+        if len(ensemble.keys()) < 2:
+            raise EnumerationError(
+                f"Failed to enumerate microstates across 2 charge states for {query_smi}. "
+                "Try widening ``ensemble_formal_charge_limits``, using ``ensemble_beam_width=None``, "
+                "or enumerating manually and calling ``get_macro_pka_from_macrostates``."
             )
 
         ensemble_free_energy: dict[int, list[tuple[str, Chem.Mol, float]]] = {}
@@ -690,7 +689,7 @@ class UnipKa(object):
 
 
         # Free energy predictions from your model, grouped by charge
-        _, ensemble_free_energy = self._predict_ensemble_free_energy(mol, pH=pH)
+        _, ensemble_free_energy = self._predict_ensemble_free_energy(mol)
 
         records = []
         partition_function = 0.0
