@@ -1,4 +1,3 @@
-import argparse
 import time
 
 import numpy as np
@@ -53,7 +52,7 @@ def process_dataset(dataset_name, calc):
     url = f"https://raw.githubusercontent.com/dptech-corp/Uni-pKa/refs/heads/main/dataset/{dataset_name}.tsv"
     df = pd.read_csv(url, sep="\t").rename(columns={"SMILES":"smiles", "TARGET": exp_col})
 
-    # Enumerate + predict microstates via _predict_ensemble_free_energy (prune window from calc),
+    # Enumerate + predict microstates via _predict_ensemble_free_energy (beam + charge limits from calc),
     # then macro pKa from listed acid/base pools (same log-sum-exp as get_macro_pka_from_macrostates).
     predictions = []
     wall_s = []
@@ -174,20 +173,8 @@ def plot_results(datasets_results, figsize=(18, 6)):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="SAMPL pKa benchmark using _predict_ensemble_free_energy (pruned ensemble expansion)."
-    )
-    parser.add_argument(
-        "--prune-window",
-        type=float,
-        default=25.0,
-        help="Passed to UnipKa(ensemble_energy_prune_window=...); microstates farther than this "
-        "above the current minimum predicted ΔG are dropped during expansion.",
-    )
-    args = parser.parse_args()
-
-    calc = unipka.UnipKa(ensemble_energy_prune_window=args.prune_window)
-    print(f"Using ensemble_energy_prune_window={args.prune_window}")
+    calc = unipka.UnipKa()
+    print("Using default UnipKa (ensemble_beam_width=20, ensemble_formal_charge_limits=(-2, 2))")
 
     datasets = ["sampl6", "sampl7", "sampl8"]
     results = {}
