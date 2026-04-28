@@ -30,6 +30,9 @@ from ._internal.template import (
     enumerate_template,
     log_sum_exp,
     prot,
+    prot_template_mol,
+    sanitize_filter_mols,
+    stereo_filter_mols,
     read_template,
 )
 from ._internal.coordinates import transplant_coordinates
@@ -358,26 +361,32 @@ class UnipKa(object):
         self, mol: Chem.Mol, maxiter: int = 10
     ) -> tuple[dict[int, list[Chem.Mol]], dict[str, float]]:
         """
-        Charge-ladder expansion as in :func:`~unipka._internal.template.get_ensemble`, with:
+        Stepwise beam search enumeration within a formal-charge window.
 
-        - **Formal-charge window** from ``ensemble_formal_charge_limits`` (widened to include
-          the input charge), so expansion does not leave that range.
+        Each global iteration:
+        - expands every current charge-state beam by one protonation step and one deprotonation
+          step (template-driven edits);
+        - scores newly seen microstates with the model;
+        - prunes each charge-state beam to at most ``beam_width`` lowest-``DfG_m`` microstates.
 
-        - After each expansion, microstates are scored with the model, then **beam search**
-          (``ensemble_beam_width``): at each charge, keep at most that many microstates with
-          lowest ``DfG_m``.
+        Terminates when (i) no new states are generated, (ii) all beams become stationary, or
+        (iii) ``maxiter`` iterations have executed.
         """
         ta, tb = self.template_a2b, self.template_b2a
-        mol0 = Chem.Mol(mol)
+        mol0 = Chem.RemoveHs(Chem.Mol(mol))
         q0 = Chem.GetFormalCharge(mol0)
+
         lim = self.charge_limits
         if lim is None:
             q_lo, q_hi = -10**9, 10**9
         else:
             q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
-        ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
+
+        k0 = _mol_canonical_key(mol0)
+        ensemble: dict[int, dict[str, Chem.Mol]] = {q0: {k0: mol0}}
+        visited: set[str] = {k0}
         g_cache: dict[str, float] = {}
-        q_cache: dict[str, int] = {}
+        q_cache: dict[str, int] = {k0: q0}
 
         def predict_and_prune() -> None:
             self._predict_pending_pruned_bands(ensemble, g_cache, q_cache)
@@ -387,82 +396,68 @@ class UnipKa(object):
             if lim is not None:
                 self._clip_ensemble_charge_range(ensemble, q_lo, q_hi)
 
-        predict_and_prune()
-        if q0 not in ensemble or not ensemble[q0]:
-            raise EnumerationError(
-                "Beam selection removed all microstates at the input formal charge. "
-                "Try ``ensemble_beam_width=None`` or a larger value."
-            )
+        def expand_from_band(m: Chem.Mol, mode: Literal["a2b", "b2a"]) -> list[Chem.Mol]:
+            # One-step neighbor generation via SMARTS templates.
+            template = ta if mode == "a2b" else tb
+            _sites, products = prot_template_mol(template, m, mode)
+            products = sanitize_filter_mols(products, FILTER_PATTERNS)
+            products = stereo_filter_mols(products)
+            return products
 
-        m0_out, m_b1 = _enumerate_template_mols(
-            list(ensemble[q0].values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS
-        )
-        ensemble[q0] = _band_from_mols(m0_out)
-        if m_b1 and q_lo <= (q0 - 1) <= q_hi:
-            ensemble[q0 - 1] = _band_from_mols(m_b1)
-        predict_and_prune()
+        prev_sig: dict[int, frozenset[str]] = {}
 
-        visited_a2b: set[int] = {q0}
-        down_queue: deque[int] = deque()
-        if q_lo <= (q0 - 1) <= q_hi and q0 - 1 in ensemble and ensemble[q0 - 1]:
-            down_queue.append(q0 - 1)
-        n_down = 0
-        while down_queue and n_down < maxiter:
-            q_src = down_queue.popleft()
-            if q_src in visited_a2b:
-                continue
-            band = ensemble.get(q_src)
-            if not band:
-                continue
-            visited_a2b.add(q_src)
-            n_down += 1
-            _, m_b = _enumerate_template_mols(list(band.values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS)
-            if not m_b:
-                continue
-            q_dst = q_src - 1
-            if q_dst < q_lo:
-                continue
-            _band_merge(ensemble.setdefault(q_dst, {}), m_b)
-            down_queue.append(q_dst)
+        for _it in range(maxiter):
             predict_and_prune()
 
-        if q0 not in ensemble or not ensemble[q0]:
-            raise EnumerationError(
-                "Beam selection removed all microstates at the input formal charge before the "
-                "b2a pass. Try ``ensemble_beam_width=None`` or a larger value."
-            )
+            sig = {q: frozenset(band.keys()) for q, band in ensemble.items()}
+            if prev_sig and all(sig.get(q) == prev_sig.get(q) for q in set(sig) | set(prev_sig)):
+                break  # (ii) beams stationary
+            prev_sig = sig
 
-        m_a1, m0_b2a = _enumerate_template_mols(
-            list(ensemble[q0].values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS
-        )
-        ensemble[q0] = _band_from_mols(m0_b2a)
-        visited_b2a: set[int] = {q0}
-        up_queue: deque[int] = deque()
-        if m_a1 and q_lo <= (q0 + 1) <= q_hi:
-            ensemble[q0 + 1] = _band_from_mols(m_a1)
-            up_queue.append(q0 + 1)
+            new_by_q: dict[int, dict[str, Chem.Mol]] = defaultdict(dict)
+            n_new = 0
+
+            # Snapshot current beams so we don't expand newly added states in the same iteration.
+            current = {q: list(band.values()) for q, band in ensemble.items()}
+            for q, mols in current.items():
+                if not mols:
+                    continue
+
+                # deprotonation: q -> q-1
+                q_down = q - 1
+                if q_lo <= q_down <= q_hi:
+                    for m in mols:
+                        for prod in expand_from_band(m, "a2b"):
+                            k = _mol_canonical_key(prod)
+                            if k in visited:
+                                continue
+                            visited.add(k)
+                            new_by_q[q_down][k] = prod
+                            q_cache[k] = q_down
+                            n_new += 1
+
+                # protonation: q -> q+1
+                q_up = q + 1
+                if q_lo <= q_up <= q_hi:
+                    for m in mols:
+                        for prod in expand_from_band(m, "b2a"):
+                            k = _mol_canonical_key(prod)
+                            if k in visited:
+                                continue
+                            visited.add(k)
+                            new_by_q[q_up][k] = prod
+                            q_cache[k] = q_up
+                            n_new += 1
+
+            if n_new == 0:
+                break  # (i) no new states generated
+
+            for q, band in new_by_q.items():
+                dest = ensemble.setdefault(q, {})
+                for k, m in band.items():
+                    dest.setdefault(k, m)
+
         predict_and_prune()
-
-        n_up = 0
-        while up_queue and n_up < maxiter:
-            q_src = up_queue.popleft()
-            if q_src in visited_b2a:
-                continue
-            band = ensemble.get(q_src)
-            if not band:
-                continue
-            visited_b2a.add(q_src)
-            n_up += 1
-            m_a, _ = _enumerate_template_mols(list(band.values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS)
-            if not m_a:
-                continue
-            q_dst = q_src + 1
-            if q_dst > q_hi:
-                continue
-            _band_merge(ensemble.setdefault(q_dst, {}), m_a)
-            up_queue.append(q_dst)
-            predict_and_prune()
-
         out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
         return out, g_cache
 
@@ -907,3 +902,10 @@ class UnipKa(object):
 
     
 
+
+
+if __name__ == "__main__":
+
+    smi = "C#Cc1cc2c(N(C)Cc3ccc(-c4c(C(=O)O)cnn4C)cc3)ncnc2cc1NCc1ccc(O)cc1N1CCNCC1"
+    calc = UnipKa()
+    calc.get_distribution(smi)
