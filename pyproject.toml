@@ -9,6 +9,7 @@ authors = [{name = "Finlay MacLean"}]
 readme = "README.md"
 license = {text = "MIT"}
 dependencies = [
+    "temporalio",
     "requests",
     "platformdirs",
     "scipy",

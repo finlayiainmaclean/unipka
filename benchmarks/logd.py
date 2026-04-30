@@ -23,7 +23,7 @@ def main():
     df = pd.read_csv(
         "https://raw.githubusercontent.com/nanxstats/logd74/refs/heads/master/logd74.tsv",
         sep="\t"
-    ).rename(columns={"SMILES":"smiles", "logD7.4": exp_col}).sample(100)
+    ).rename(columns={"SMILES":"smiles", "logD7.4": exp_col}).sample(20)
 
     df['mol'] = [Chem.MolFromSmiles(smi) for smi in df.smiles]
     df = df.dropna(subset=['mol'])
@@ -40,20 +40,6 @@ def main():
         logds.append(logd)
     df[pred_col] = logds
     
-    # Remove failed
-    bad_df = df[df[pred_col].isnull()]
-
-    # Generate the grid image
-    img = Draw.MolsToGridImage(
-        bad_df.mol.tolist(),
-        molsPerRow=10,
-        subImgSize=(300, 300),
-        useSVG=False  # Use PNG for file output
-    )
-    
-    # Save to file
-    img.save("benchmarks/logd_failed_molecules.png")
-
 
     old_len = len(df)
     df.dropna(subset=[exp_col, pred_col], inplace=True)

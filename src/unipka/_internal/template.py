@@ -5,6 +5,8 @@ from typing import Callable, Dict, List, OrderedDict, Sequence, Tuple, Union
 import pandas as pd
 from rdkit import Chem
 
+from .temporal_activity import heartbeat
+
 
 class ProtonationError(Exception):
     pass
@@ -110,7 +112,8 @@ def _mols_to_canonical_smiles(mols: Sequence[Chem.Mol]) -> List[str]:
 def prot_template_mol(template: pd.DataFrame, mol: Chem.Mol, mode: str) -> Tuple[List[int], List[Chem.Mol]]:
     sites = match_template(template, mol)
     products: Dict[str, Chem.Mol] = {}
-    for site in sites:
+    for si, site in enumerate(sites):
+        heartbeat({"prot_template_mol": "site", "mode": mode, "si": si, "n_sites": len(sites)})
         pm = prot(mol, site, mode)
         if pm is None:
             continue
@@ -351,6 +354,15 @@ def _enumerate_template_mols(
     pool_length_B = -1
     i = 0
     while (len(mols_A_pool) != pool_length_A or len(mols_B_pool) != pool_length_B) and i < maxiter:
+        heartbeat(
+            {
+                "_enumerate_template_mols": "iter",
+                "mode": mode,
+                "i": i,
+                "n_A": len(mols_A_pool),
+                "n_B": len(mols_B_pool),
+            }
+        )
         pool_length_A, pool_length_B = len(mols_A_pool), len(mols_B_pool)
         if verbose > 0:
             print(f"iter {i}: {pool_length_A} acid, {pool_length_B} base")
@@ -361,13 +373,19 @@ def _enumerate_template_mols(
             )
         if (mode == "a2b" and (i + 1) % 2) or (mode == "b2a" and i % 2):
             mols_A_tmp_pool = []
-            for mol in mols_A_pool:
+            for mj, mol in enumerate(mols_A_pool):
+                heartbeat(
+                    {"_enumerate_template_mols": "expand_a2b", "mode": mode, "outer_i": i, "mj": mj}
+                )
                 mols_B_pool += filters(prot_template_mol(template_a2b, mol, "a2b")[1])
                 mols_A_tmp_pool += filters([Chem.Mol(mol)])
             mols_A_pool += mols_A_tmp_pool
         elif (mode == "b2a" and (i + 1) % 2) or (mode == "a2b" and i % 2):
             mols_B_tmp_pool = []
-            for mol in mols_B_pool:
+            for mj, mol in enumerate(mols_B_pool):
+                heartbeat(
+                    {"_enumerate_template_mols": "expand_b2a", "mode": mode, "outer_i": i, "mj": mj}
+                )
                 mols_A_pool += filters(prot_template_mol(template_b2a, mol, "b2a")[1])
                 mols_B_tmp_pool += filters([Chem.Mol(mol)])
             mols_B_pool += mols_B_tmp_pool
@@ -459,6 +477,7 @@ def get_ensemble(
     q0 = Chem.GetFormalCharge(mol0)
     ensemble: Dict[int, Dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
 
+    heartbeat({"get_ensemble": "start_a2b_shell", "q0": q0})
     m0_out, m_b1 = _enumerate_template_mols(
         list(ensemble[q0].values()), template_a2b, template_b2a, "a2b", maxiter, 0, FILTER_PATTERNS
     )
@@ -472,6 +491,7 @@ def get_ensemble(
 
     n_down = 0
     while down_queue and n_down < maxiter:
+        heartbeat({"get_ensemble": "down_queue", "n_down": n_down, "q_src_peek": down_queue[0] if down_queue else None})
         q_src = down_queue.popleft()
         if q_src in visited_a2b:
             continue
@@ -489,6 +509,7 @@ def get_ensemble(
         _band_merge(ensemble.setdefault(q_dst, {}), m_b)
         down_queue.append(q_dst)
 
+    heartbeat({"get_ensemble": "start_b2a_shell", "q0": q0})
     m_a1, m0_b2a = _enumerate_template_mols(
         list(ensemble[q0].values()), template_a2b, template_b2a, "b2a", maxiter, 0, FILTER_PATTERNS
     )
@@ -502,6 +523,7 @@ def get_ensemble(
 
     n_up = 0
     while up_queue and n_up < maxiter:
+        heartbeat({"get_ensemble": "up_queue", "n_up": n_up, "q_src_peek": up_queue[0] if up_queue else None})
         q_src = up_queue.popleft()
         if q_src in visited_b2a:
             continue

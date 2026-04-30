@@ -37,6 +37,7 @@ from ._internal.template import (
 )
 from ._internal.coordinates import transplant_coordinates
 from ._internal.widget import Widget
+from ._internal.temporal_activity import heartbeat
 
 from .assets import get_model_path, get_pattern_path, load_kpuu_model
 
@@ -119,7 +120,7 @@ class UnipKa(object):
         self,
         batch_size=32,
         remove_hs=False,
-        use_simple_smarts: bool = False,
+        use_simple_smarts: bool = True,
         beam_width: Optional[int] = 20,
         charge_limits: Optional[Tuple[int, int]] = (-2, 2),
     ):
@@ -235,7 +236,8 @@ class UnipKa(object):
 
         energies: list[float] = []
 
-        for batch in dataloader:
+        for bi, batch in enumerate(dataloader):
+            heartbeat({"_predict": "batch", "batch_index": bi, "batch_size": self.batch_size})
             net_input, _ = self._decorate_torch_batch(batch)
             with torch.no_grad():
                 predictions = self.model(**net_input)
@@ -303,14 +305,18 @@ class UnipKa(object):
         pending: list[Chem.Mol] = []
         pending_q: list[int] = []
         for q, band in ensemble.items():
+            heartbeat({"_predict_pending_pruned_bands": "charge_band", "q": q, "band_size": len(band)})
             for k, m in band.items():
+                heartbeat({"_predict_pending_pruned_bands": "microstate", "q": q, "cached": k in g_cache})
                 if k not in g_cache:
                     pending.append(m)
                     pending_q.append(q)
         if not pending:
             return
+        heartbeat({"_predict_pending_pruned_bands": "predict", "n_pending": len(pending)})
         pred = self._predict(pending)
-        for m, q in zip(pending, pending_q, strict=True):
+        for mi, (m, q) in enumerate(zip(pending, pending_q, strict=True)):
+            heartbeat({"_predict_pending_pruned_bands": "merge_pred", "mi": mi, "q": q})
             sk = _mol_canonical_key(m)
             if sk in pred:
                 g_cache[sk] = pred[sk]
@@ -345,6 +351,7 @@ class UnipKa(object):
         if beam_width <= 0:
             return
         for q in list(ensemble.keys()):
+            heartbeat({"_beam_prune_ensemble_bands": "q", "q": q})
             band = ensemble[q]
             scored = [(k, g_cache[k]) for k in band if k in g_cache]
             unscored = [k for k in band if k not in g_cache]
@@ -382,6 +389,7 @@ class UnipKa(object):
         else:
             q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
 
+        heartbeat({"_get_ensemble_pruned": "start", "q0": q0, "q_lo": q_lo, "q_hi": q_hi})
         k0 = _mol_canonical_key(mol0)
         ensemble: dict[int, dict[str, Chem.Mol]] = {q0: {k0: mol0}}
         visited: set[str] = {k0}
@@ -389,6 +397,7 @@ class UnipKa(object):
         q_cache: dict[str, int] = {k0: q0}
 
         def predict_and_prune() -> None:
+            heartbeat({"_get_ensemble_pruned": "predict_and_prune"})
             self._predict_pending_pruned_bands(ensemble, g_cache, q_cache)
             bw = self.beam_width
             if bw is not None:
@@ -398,15 +407,26 @@ class UnipKa(object):
 
         def expand_from_band(m: Chem.Mol, mode: Literal["a2b", "b2a"]) -> list[Chem.Mol]:
             # One-step neighbor generation via SMARTS templates.
+            heartbeat({"_get_ensemble_pruned": "expand_from_band", "mode": mode})
             template = ta if mode == "a2b" else tb
             _sites, products = prot_template_mol(template, m, mode)
             products = sanitize_filter_mols(products, FILTER_PATTERNS)
             products = stereo_filter_mols(products)
+            for pi, _prod in enumerate(products):
+                heartbeat({"_get_ensemble_pruned": "expand_product", "mode": mode, "pi": pi})
             return products
 
         prev_sig: dict[int, frozenset[str]] = {}
 
         for _it in range(maxiter):
+            heartbeat(
+                {
+                    "_get_ensemble_pruned": "iter",
+                    "it": _it,
+                    "bands": len(ensemble),
+                    "visited": len(visited),
+                }
+            )
             predict_and_prune()
 
             sig = {q: frozenset(band.keys()) for q, band in ensemble.items()}
@@ -422,11 +442,13 @@ class UnipKa(object):
             for q, mols in current.items():
                 if not mols:
                     continue
+                heartbeat({"_get_ensemble_pruned": "expand_charge", "q": q, "n_mols": len(mols)})
 
                 # deprotonation: q -> q-1
                 q_down = q - 1
                 if q_lo <= q_down <= q_hi:
-                    for m in mols:
+                    for mi, m in enumerate(mols):
+                        heartbeat({"_get_ensemble_pruned": "a2b_mol", "q": q, "mi": mi})
                         for prod in expand_from_band(m, "a2b"):
                             k = _mol_canonical_key(prod)
                             if k in visited:
@@ -439,7 +461,8 @@ class UnipKa(object):
                 # protonation: q -> q+1
                 q_up = q + 1
                 if q_lo <= q_up <= q_hi:
-                    for m in mols:
+                    for mi, m in enumerate(mols):
+                        heartbeat({"_get_ensemble_pruned": "b2a_mol", "q": q, "mi": mi})
                         for prod in expand_from_band(m, "b2a"):
                             k = _mol_canonical_key(prod)
                             if k in visited:
@@ -453,10 +476,12 @@ class UnipKa(object):
                 break  # (i) no new states generated
 
             for q, band in new_by_q.items():
+                heartbeat({"_get_ensemble_pruned": "merge_new", "q": q, "n_new_band": len(band)})
                 dest = ensemble.setdefault(q, {})
                 for k, m in band.items():
                     dest.setdefault(k, m)
 
+        heartbeat({"_get_ensemble_pruned": "final_predict_prune"})
         predict_and_prune()
         out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
         return out, g_cache
@@ -483,8 +508,10 @@ class UnipKa(object):
             q_lo, q_hi = -10**9, 10**9
         else:
             q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
+        heartbeat({"_get_ensemble_unpruned": "start", "q0": q0, "q_lo": q_lo, "q_hi": q_hi})
         ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
 
+        heartbeat({"_get_ensemble_unpruned": "enumerate_a2b_shell"})
         m0_out, m_b1 = _enumerate_template_mols(
             list(ensemble[q0].values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS
         )
@@ -498,6 +525,13 @@ class UnipKa(object):
             down_queue.append(q0 - 1)
         n_down = 0
         while down_queue and n_down < maxiter:
+            heartbeat(
+                {
+                    "_get_ensemble_unpruned": "down_queue",
+                    "n_down": n_down,
+                    "q_peek": down_queue[0] if down_queue else None,
+                }
+            )
             q_src = down_queue.popleft()
             if q_src in visited_a2b:
                 continue
@@ -506,6 +540,7 @@ class UnipKa(object):
                 continue
             visited_a2b.add(q_src)
             n_down += 1
+            heartbeat({"_get_ensemble_unpruned": "enumerate_a2b_band", "q_src": q_src})
             _, m_b = _enumerate_template_mols(list(band.values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS)
             if not m_b:
                 continue
@@ -515,6 +550,7 @@ class UnipKa(object):
             _band_merge(ensemble.setdefault(q_dst, {}), m_b)
             down_queue.append(q_dst)
 
+        heartbeat({"_get_ensemble_unpruned": "enumerate_b2a_shell"})
         m_a1, m0_b2a = _enumerate_template_mols(
             list(ensemble[q0].values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS
         )
@@ -527,6 +563,13 @@ class UnipKa(object):
 
         n_up = 0
         while up_queue and n_up < maxiter:
+            heartbeat(
+                {
+                    "_get_ensemble_unpruned": "up_queue",
+                    "n_up": n_up,
+                    "q_peek": up_queue[0] if up_queue else None,
+                }
+            )
             q_src = up_queue.popleft()
             if q_src in visited_b2a:
                 continue
@@ -535,6 +578,7 @@ class UnipKa(object):
                 continue
             visited_b2a.add(q_src)
             n_up += 1
+            heartbeat({"_get_ensemble_unpruned": "enumerate_b2a_band", "q_src": q_src})
             m_a, _ = _enumerate_template_mols(list(band.values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS)
             if not m_a:
                 continue
@@ -546,6 +590,7 @@ class UnipKa(object):
 
         out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
         all_mols = [m for macrostate in out.values() for m in macrostate]
+        heartbeat({"_get_ensemble_unpruned": "predict_all", "n_mols": len(all_mols)})
         pred = self._predict(all_mols) if all_mols else {}
         g_cache: dict[str, float] = {}
         for m in all_mols:
@@ -560,14 +605,18 @@ class UnipKa(object):
     ) -> tuple[dict[int, list[Chem.Mol]], dict[int, list[tuple[str, Chem.Mol, float]]]]:
         """Enumerate microstates with per-charge beam pruning; returned ``DfG_m`` values are raw model outputs."""
         query_smi = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
+        heartbeat({"_predict_ensemble_free_energy": "start", "query_smi": query_smi})
 
         ensemble: dict[int, list[Chem.Mol]]
         g_cache: dict[str, float]
         try:
             ensemble, g_cache = self._get_ensemble_pruned(mol)
+            heartbeat({"_predict_ensemble_free_energy": "after_pruned", "n_Q": len(ensemble)})
         except EnumerationError as e:
             logger.warning(f"Enumeration error: {e}. Retrying with unpruned ensemble.")
+            heartbeat({"_predict_ensemble_free_energy": "fallback_unpruned"})
             ensemble, g_cache = self._get_ensemble_unpruned(mol)
+            heartbeat({"_predict_ensemble_free_energy": "after_unpruned", "n_Q": len(ensemble)})
 
         if len(ensemble.keys()) < 2:
             raise EnumerationError(
@@ -578,6 +627,9 @@ class UnipKa(object):
 
         ensemble_free_energy: dict[int, list[tuple[str, Chem.Mol, float]]] = {}
         for q, macrostate in ensemble.items():
+            heartbeat(
+                {"_predict_ensemble_free_energy": "macrostate_row", "q": q, "n_micro": len(macrostate)}
+            )
             row: list[tuple[str, Chem.Mol, float]] = []
             for m in macrostate:
                 s = _mol_canonical_key(m)
