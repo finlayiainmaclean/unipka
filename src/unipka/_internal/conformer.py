@@ -1,5 +1,9 @@
 import logging
-from typing import Sequence, Union
+import multiprocessing
+import os
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+from typing import Final, Sequence, Union
 
 import numpy as np
 from rdkit import Chem
@@ -9,6 +13,19 @@ from .dict import DICT, DICT_CHARGE, Dictionary
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _detect_cpus() -> int:
+    env = os.environ.get("TORCH_NUM_THREADS")
+    if env:
+        return max(1, int(env))
+    try:
+        return max(1, len(os.sched_getaffinity(0)))  # Linux: respects cpusets/cgroups
+    except AttributeError:
+        return max(1, multiprocessing.cpu_count())
+
+
+NUM_CPUS: Final[int] = _detect_cpus()
 
 
 class ConformerGen(object):
@@ -27,6 +44,10 @@ class ConformerGen(object):
         :raises ValueError: If the model name is not recognized.
         """
         self._init_features(**params)
+        # Cache by canonical SMILES so repeated inputs skip embedding + featurization.
+        # Bound to the instance so config changes via a new ConformerGen get a fresh cache.
+        cache_size = params.get("cache_size", 4096)
+        self._cached_process_smi = lru_cache(maxsize=cache_size)(self._process_smi)
 
     def _init_features(self, **params):
         """
@@ -56,22 +77,34 @@ class ConformerGen(object):
         :return: A unimolecular data representation (dictionary) of the molecule.
         :raises ValueError: If the conformer generation method is unrecognized.
         """
-        if self.method == "rdkit_random":
-            mol = Chem.MolFromSmiles(mol_or_smi) if isinstance(mol_or_smi, str) else mol_or_smi
-            atoms, coordinates, charges = inner_mol2coords(
-                mol, seed=self.seed, mode=self.mode, remove_hs=self.remove_hs
-            )
-            return coords2unimol(
-                atoms,
-                coordinates,
-                charges,
-                self.dictionary,
-                self.charge_dictionary,
-                self.max_atoms,
-                remove_hs=self.remove_hs,
-            )
-        else:
+        if self.method != "rdkit_random":
             raise ValueError("Unknown conformer generation method: {}".format(self.method))
+        if isinstance(mol_or_smi, str):
+            return self._cached_process_smi(mol_or_smi)
+        # Mols carrying a pre-computed conformer would lose their coords on a SMILES
+        # round-trip, so bypass the cache and process them directly.
+        if mol_or_smi.GetNumConformers() > 0:
+            return self._process_mol(mol_or_smi)
+        smi = Chem.MolToSmiles(mol_or_smi, canonical=True, isomericSmiles=True)
+        return self._cached_process_smi(smi)
+
+    def _process_smi(self, smi: str):
+        mol = Chem.MolFromSmiles(smi)
+        return self._process_mol(mol)
+
+    def _process_mol(self, mol: Chem.Mol):
+        atoms, coordinates, charges = inner_mol2coords(
+            mol, seed=self.seed, mode=self.mode, remove_hs=self.remove_hs
+        )
+        return coords2unimol(
+            atoms,
+            coordinates,
+            charges,
+            self.dictionary,
+            self.charge_dictionary,
+            self.max_atoms,
+            remove_hs=self.remove_hs,
+        )
 
     def transform_raw(self, atoms_list, coordinates_list, charges_list):
         inputs = []
@@ -90,8 +123,17 @@ class ConformerGen(object):
         return inputs
 
     def transform(self, mols_or_smis: Sequence[Union[str, Chem.Mol]]):
-        logger.info("Start generating conformers...")
-        inputs = [self.single_process(item) for item in mols_or_smis]
+
+        n = len(mols_or_smis)
+        logger.info(f"Start generating conformers for {n} molecules")
+        # RDKit's EmbedMolecule releases the GIL, so threads give real parallelism here.
+        # For tiny batches the pool setup overhead dominates; fall back to sequential.
+        workers = min(NUM_CPUS, n)
+        if workers <= 1:
+            inputs = [self.single_process(item) for item in mols_or_smis]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                inputs = list(ex.map(self.single_process, mols_or_smis))
         failed_cnt = np.mean([(item["src_coord"] == 0.0).all() for item in inputs])
         logger.info("Succeed to generate conformers for {:.2f}% of molecules.".format((1 - failed_cnt) * 100))
         failed_3d_cnt = np.mean([(item["src_coord"][:, 2] == 0.0).all() for item in inputs])
@@ -99,7 +141,19 @@ class ConformerGen(object):
         return inputs
 
 
-def inner_mol2coords(mol: Chem.Mol, seed=42, mode="heavy", remove_hs=True):
+def _etkdg_params(seed: int) -> AllChem.ETKDGv3:
+    p = AllChem.ETKDGv3()
+    p.randomSeed = seed
+    # Random starting coords are more robust on macrocycles / awkward rings and
+    # usually converge in fewer attempts than the default 2D-init pathway.
+    p.useRandomCoords = True
+    p.numThreads = 1
+    # NB: numThreads on EmbedParameters is only consulted by EmbedMultipleConfs,
+    # so we don't set it here. Cross-molecule parallelism lives in transform().
+    return p
+
+
+def inner_mol2coords(mol: Chem.Mol, seed=42, mode="fast", remove_hs=True):
     """
     Convert an RDKit molecule (with implicit Hs) into 3D coordinates per atom.
 
@@ -107,7 +161,8 @@ def inner_mol2coords(mol: Chem.Mol, seed=42, mode="heavy", remove_hs=True):
 
     :param mol: RDKit molecule (typically without explicit Hs; Hs are added internally).
     :param seed: Random seed for conformer embedding.
-    :param mode: ``'fast'`` or ``'heavy'`` (more embed attempts on failure).
+    :param mode: ``'fast'`` skips MMFF relaxation (ETKDG geometry is used as-is);
+                 ``'heavy'`` runs a capped MMFF relaxation and retries embedding on failure.
     :param remove_hs: If True, drop hydrogen atoms from returned atom/coordinate lists.
 
     :return: ``(atoms, coordinates, charges)``.
@@ -123,30 +178,27 @@ def inner_mol2coords(mol: Chem.Mol, seed=42, mode="heavy", remove_hs=True):
         coordinates = mol.GetConformer().GetPositions().astype(np.float32)
     else:
         try:
-            # will random generate conformer with seed equal to -1. else fixed random seed.
-            res = AllChem.EmbedMolecule(mol, randomSeed=seed)
+            res = AllChem.EmbedMolecule(mol, _etkdg_params(seed))
             if res == 0:
-                try:
-                    # some conformer can not use MMFF optimize
-                    AllChem.MMFFOptimizeMolecule(mol)
-                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-                except Exception:
-                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-            ## for fast test... ignore this ###
+                if mode == "heavy":
+                    try:
+                        print("Running MMFF optimization")
+                        AllChem.MMFFOptimizeMolecule(mol, maxIters=50)
+                    except Exception:
+                        pass
+                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
             elif res == -1 and mode == "heavy":
                 AllChem.EmbedMolecule(mol, maxAttempts=5000, randomSeed=seed)
                 try:
-                    # some conformer can not use MMFF optimize
-                    AllChem.MMFFOptimizeMolecule(mol)
+                    print("Running MMFF optimization")
+                    AllChem.MMFFOptimizeMolecule(mol, maxIters=50)
                     coordinates = mol.GetConformer().GetPositions().astype(np.float32)
                 except Exception:
                     AllChem.Compute2DCoords(mol)
-                    coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
-                    coordinates = coordinates_2d
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
             else:
                 AllChem.Compute2DCoords(mol)
-                coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
-                coordinates = coordinates_2d
+                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
         except Exception:
             print("Failed to generate conformer, replace with zeros.")
             coordinates = np.zeros((len(atoms), 3))
