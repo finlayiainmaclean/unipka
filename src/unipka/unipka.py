@@ -13,7 +13,7 @@ from rdkit import Chem, RDLogger
 from rdkit.Chem import Crippen
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
-
+from ._internal.tautomers import tautomer_seeds_at_formal_charge
 from ._internal.solvation import get_solvation_energy as _get_solvation_energy
 from ._internal.draw import calc_base_name, draw_ensemble, get_neutral_base_name
 from ._internal.conformer import ConformerGen
@@ -123,6 +123,7 @@ class UnipKa(object):
         use_simple_smarts: bool = True,
         beam_width: Optional[int] = 20,
         charge_limits: Optional[Tuple[int, int]] = (-2, 2),
+        enumerate_tautomers: bool = False,
     ):
         """
         :param ensemble_beam_width: After each scoring step, at each formal charge ``q`` the
@@ -146,6 +147,7 @@ class UnipKa(object):
         self.template_a2b, self.template_b2a = read_template(pattern_path)
         self.beam_width = beam_width
         self.charge_limits = charge_limits
+        self.enumerate_tautomers = enumerate_tautomers
 
 
     #### Internal functions ####
@@ -390,11 +392,14 @@ class UnipKa(object):
             q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
 
         heartbeat()
-        k0 = _mol_canonical_key(mol0)
-        ensemble: dict[int, dict[str, Chem.Mol]] = {q0: {k0: mol0}}
-        visited: set[str] = {k0}
+        from ._internal.tautomers import tautomer_seeds_at_formal_charge
+        seeds = tautomer_seeds_at_formal_charge(mol0, q0, expand=self.enumerate_tautomers)
+        ensemble: dict[int, dict[str, Chem.Mol]] = {
+            q0: {_mol_canonical_key(m): m for m in seeds}
+        }
+        visited: set[str] = set(ensemble[q0].keys())
         g_cache: dict[str, float] = {}
-        q_cache: dict[str, int] = {k0: q0}
+        q_cache: dict[str, int] = {k: q0 for k in ensemble[q0]}
 
         def predict_and_prune() -> None:
             heartbeat()
@@ -502,7 +507,8 @@ class UnipKa(object):
         else:
             q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
         heartbeat()
-        ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
+        seeds = tautomer_seeds_at_formal_charge(mol0, q0, expand=self.enumerate_tautomers)
+        ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols(seeds)}
 
         heartbeat()
         m0_out, m_b1 = _enumerate_template_mols(
