@@ -34,10 +34,11 @@ class TestUnipKaInitialization:
         assert hasattr(calc, 'template_b2a')
 
     def test_init_custom_params(self):
-        calc = UnipKa(batch_size=16, remove_hs=True)
+        calc = UnipKa(batch_size=16, remove_hs=True, enumerate_tautomers=True)
         assert calc.batch_size == 16
         assert calc.params["remove_hs"]
         assert calc.device.type == 'cpu'
+        assert calc.enumerate_tautomers is True
 
 
 class TestUnipKaPublicMethods:
@@ -265,3 +266,33 @@ class TestUnipKaIntegration:
         sp, ref_df = unipka_calc.get_state_penalty(smi, pH=7.4)
         assert isinstance(sp, float)
         assert isinstance(ref_df, pd.DataFrame)
+
+    def test_enumerate_tautomers_workflow(self):
+        calc = UnipKa(enumerate_tautomers=True, batch_size=16)
+        smi = "c1c[nH]cn1"  # Imidazole
+        df = calc.get_distribution(smi, pH=7.4)
+        assert not df.empty
+        assert 'population' in df.columns
+        print(df)
+
+    def test_2_hydroxypyridine_tautomer_enumeration(self):
+        """Test that 2-hydroxypyridine tautomers (lactam/lactim forms) are enumerated when enabled."""
+        smi = "Oc1ccccn1"
+        
+        # 1. Without tautomer enumeration
+        calc_no = UnipKa(enumerate_tautomers=False, batch_size=16)
+        df_no = calc_no.get_distribution(smi)
+        smiles_no = df_no["smiles"].tolist()
+        
+        # Should contain the lactim form but NOT the lactam (2-pyridone) form
+        assert "Oc1ccccn1" in smiles_no
+        assert "O=c1cccc[nH]1" not in smiles_no
+        
+        # 2. With tautomer enumeration
+        calc_yes = UnipKa(enumerate_tautomers=True, batch_size=16)
+        df_yes = calc_yes.get_distribution(smi)
+        smiles_yes = df_yes["smiles"].tolist()
+        
+        # Should now contain both lactim and lactam forms
+        assert "Oc1ccccn1" in smiles_yes
+        assert "O=c1cccc[nH]1" in smiles_yes
