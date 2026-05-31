@@ -3,7 +3,7 @@ import logging
 
 import numpy as np
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdFMCS
 from rdkit.Geometry import Point3D
 from scipy.spatial.distance import cdist
 
@@ -63,6 +63,60 @@ def has_conformer(mol: Chem.Mol, /, *, conf_id: int):
     conformer_ids = {conf.GetId() for conf in mol.GetConformers()}
     return conf_id in conformer_ids
 
+
+def _prepare_for_match(mol: Chem.Mol) -> Chem.Mol:
+    mol = copy.deepcopy(mol)
+    for atom in mol.GetAtoms():
+        atom.SetFormalCharge(0)
+        atom.SetNoImplicit(True)
+        atom.SetNumExplicitHs(0)
+    return mol
+
+
+def _ref_atom_map_for_query(ref_noh: Chem.Mol, query_noh: Chem.Mol) -> tuple[int, ...]:
+    """Map each query heavy-atom index to the matching reference heavy-atom index."""
+    ref_copy = _prepare_for_match(ref_noh)
+    query_copy = _prepare_for_match(query_noh)
+
+    match = ref_copy.GetSubstructMatch(query_copy)
+    if len(match) == ref_noh.GetNumAtoms():
+        return match
+
+    mcs = rdFMCS.FindMCS(
+        [ref_copy, query_copy],
+        bondCompare=rdFMCS.BondCompare.CompareAny,
+        atomCompare=rdFMCS.AtomCompare.CompareElements,
+    )
+    if mcs.numAtoms != ref_noh.GetNumAtoms():
+        raise ValueError(
+            f"MCS matched {mcs.numAtoms} atoms, expected {ref_noh.GetNumAtoms()} "
+            f"for {Chem.MolToSmiles(query_noh)}"
+        )
+
+    mcs_mol = Chem.MolFromSmarts(mcs.smartsString)
+    if mcs_mol is None:
+        raise ValueError(f"Failed to build MCS query for {Chem.MolToSmiles(query_noh)}")
+
+    ref_match = ref_copy.GetSubstructMatch(mcs_mol)
+    query_match = query_copy.GetSubstructMatch(mcs_mol)
+    if len(ref_match) != ref_noh.GetNumAtoms() or len(query_match) != query_noh.GetNumAtoms():
+        raise ValueError(
+            f"MCS substructure match incomplete for {Chem.MolToSmiles(query_noh)}"
+        )
+
+    logger.debug(
+        "Substructure match failed; mapped coordinates with MCS for %s",
+        Chem.MolToSmiles(query_noh),
+    )
+
+    mapping: list[int | None] = [None] * query_noh.GetNumAtoms()
+    for ref_idx, query_idx in zip(ref_match, query_match, strict=True):
+        mapping[query_idx] = ref_idx
+    if any(idx is None for idx in mapping):
+        raise ValueError(f"MCS atom mapping incomplete for {Chem.MolToSmiles(query_noh)}")
+    return tuple(mapping)
+
+
 def transplant_coordinates(ref: Chem.Mol, query: Chem.Mol) -> Chem.Mol:
     """Transplant coordinates from reference molecule to query molecule."""
     DISTANCE_THRESHOLD = 0.25
@@ -70,23 +124,13 @@ def transplant_coordinates(ref: Chem.Mol, query: Chem.Mol) -> Chem.Mol:
     query_noh = Chem.RemoveHs(query)
     ref_noh = Chem.RemoveHs(ref)
 
-    query_copy = copy.deepcopy(query_noh)
-    ref_copy = copy.deepcopy(ref_noh)
+    if ref_noh.GetNumAtoms() != query_noh.GetNumAtoms():
+        raise ValueError(
+            f"Atom count mismatch: ref has {ref_noh.GetNumAtoms()}, "
+            f"query has {query_noh.GetNumAtoms()}"
+        )
 
-    assert ref_noh.GetNumAtoms() == query_noh.GetNumAtoms()
-
-    for atom in query_copy.GetAtoms():
-        atom.SetFormalCharge(0)
-        atom.SetNoImplicit(True)
-        atom.SetNumExplicitHs(0)
-
-    for atom in ref_copy.GetAtoms():
-        atom.SetFormalCharge(0)
-        atom.SetNoImplicit(True)
-        atom.SetNumExplicitHs(0)
-
-    match = ref_copy.GetSubstructMatch(query_copy)
-    assert len(match) == ref_noh.GetNumAtoms()
+    match = _ref_atom_map_for_query(ref_noh, query_noh)
     coords = get_coordinates(ref_noh)
     set_coordinates(query_noh, coords[np.array(match)])  # Set coords of heavy atoms
     query = Chem.AddHs(query_noh, addCoords=True)  # Add any missing hydrogens
