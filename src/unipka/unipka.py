@@ -713,9 +713,12 @@ class UnipKa(object):
             case _:
                 raise ValueError(f"{mode} not a vaid mode. Choose from `matplotlib` and `jupyter`")
                 
-    def get_distribution(self, mol: Chem.Mol | str, /, *, pH: float = 7.4) -> pd.DataFrame:
+    def get_distribution(self, mol: Chem.Mol | str, /, *, pH: float | list[float] = 7.4) -> pd.DataFrame:
 
-        
+        if isinstance(pH, float):
+            pHs = [pH]
+        else:
+            pHs = pH
         if isinstance(mol, str):
             mol = Chem.MolFromSmiles(mol)
 
@@ -723,29 +726,39 @@ class UnipKa(object):
         # Free energy predictions from your model, grouped by charge
         _, ensemble_free_energy = self._predict_ensemble_free_energy(mol)
 
-        records = []
-        partition_function = 0.0
 
-        # Collect Boltzmann weights and energy terms
-        for q, macrostate_free_energy in ensemble_free_energy.items():
-            for microstate_smi, microstate_mol, DfGm in macrostate_free_energy:
-                G_pH = self._ph_adjusted_free_energy(DfGm, q, pH)
-                boltzmann_factor = math.exp(-G_pH)
-                records.append((q, microstate_smi, microstate_mol, DfGm, G_pH, boltzmann_factor))
-                partition_function += boltzmann_factor
+        dfs = []
 
-        # Normalize to get population w_i(pH)
-        df = pd.DataFrame(
-            records,
-            columns=["charge", "smiles", "mol", "free_energy", "ph_adjusted_free_energy", "boltzmann_factor"],
-        )
+        for pH in pHs:
 
-        df["relative_ph_adjusted_free_energy"] = df.ph_adjusted_free_energy - df.ph_adjusted_free_energy.min()
-        df["relative_free_energy"] = df.free_energy - df.free_energy.min()
-        df["population"] = df["boltzmann_factor"] / partition_function
+            records = []
+            partition_function = 0.0
+
+            # Collect Boltzmann weights and energy terms
+            for q, macrostate_free_energy in ensemble_free_energy.items():
+                for microstate_smi, microstate_mol, DfGm in macrostate_free_energy:
+                    G_pH = self._ph_adjusted_free_energy(DfGm, q, pH)
+                    boltzmann_factor = math.exp(-G_pH)
+                    records.append((q, microstate_smi, microstate_mol, DfGm, G_pH, boltzmann_factor, pH))
+                    partition_function += boltzmann_factor
+
+            # Normalize to get population w_i(pH)
+            df = pd.DataFrame(
+                records,
+                columns=["charge", "smiles", "mol", "free_energy", "ph_adjusted_free_energy", "boltzmann_factor", "ph"],
+            )
+
+            df["relative_ph_adjusted_free_energy"] = df.ph_adjusted_free_energy - df.ph_adjusted_free_energy.min()
+            df["relative_free_energy"] = df.free_energy - df.free_energy.min()
+            df["population"] = df["boltzmann_factor"] / partition_function
+
+            dfs.append(df)
+
+        df = pd.concat(dfs, ignore_index=True)
+
 
         # Sort for readability
-        df = df.sort_values(by="population", ascending=False).reset_index(drop=True)
+        df = df.sort_values(by=["ph", "population"], ascending=False).reset_index(drop=True)
 
         if mol.GetNumConformers() > 0:
             df["mol"] = df["mol"].apply(lambda x: transplant_coordinates(mol, x))
