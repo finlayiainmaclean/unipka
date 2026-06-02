@@ -93,6 +93,27 @@ class TestUnipKaPublicMethods:
         # Distributions should be different at different pH
         assert not df1['population'].equals(df2['population'])
 
+    def test_get_distribution_multiple_ph(self, unipka_calc, sample_molecules):
+        pHs = [2.0, 7.4, 12.0]
+        smi = sample_molecules["piperidine"]
+
+        df_single = unipka_calc.get_distribution(smi, pH=7.4)
+        df_multi = unipka_calc.get_distribution(smi, pH=pHs)
+
+        n_microstates = len(df_single)
+        assert len(df_multi) == n_microstates * len(pHs)
+        assert set(df_multi["ph"]) == set(pHs)
+        assert "ph" in df_multi.columns
+
+        for ph in pHs:
+            block = df_multi[df_multi["ph"] == ph]
+            assert len(block) == n_microstates
+            assert np.isclose(block["population"].sum(), 1.0, atol=1e-6)
+
+        microstates_per_ph = {ph: set(df_multi[df_multi["ph"] == ph]["smiles"]) for ph in pHs}
+        assert len(microstates_per_ph) == len(pHs)
+        assert all(s == microstates_per_ph[pHs[0]] for s in microstates_per_ph.values())
+
     def test_get_dominant_microstate(self, unipka_calc, sample_molecules):
         mol = unipka_calc.get_dominant_microstate(sample_molecules["piperidine"], pH=7.4)
         assert isinstance(mol, Chem.Mol)
