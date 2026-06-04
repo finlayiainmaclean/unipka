@@ -50,3 +50,29 @@ def test_get_distribution_with_tautomers_and_3d_coords():
 
     assert not df.empty
     assert df["mol"].apply(lambda m: m.GetNumConformers() > 0).all()
+
+
+def test_mmff_optimise_unsupported_metals():
+    from unipka._internal.coordinates import mmff_optimise
+    mol = Chem.MolFromSmiles("[Fe]")
+    conf = Chem.Conformer(1)
+    conf.SetAtomPosition(0, (0.0, 0.0, 0.0))
+    mol.AddConformer(conf)
+
+    res_mol, energy = mmff_optimise(mol)
+    assert res_mol is mol
+    assert energy is None
+
+
+def test_transplant_coordinates_unsupported_metals():
+    ref = Chem.MolFromSmiles("[Fe]")
+    conf = Chem.Conformer(1)
+    conf.SetAtomPosition(0, (0.0, 0.0, 0.0))
+    ref.AddConformer(conf)
+
+    query = Chem.MolFromSmiles("[Fe]")
+    
+    out = transplant_coordinates(ref, query)
+    assert out.GetNumConformers() == 1
+    assert out.GetNumAtoms() == 1
+

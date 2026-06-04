@@ -715,7 +715,7 @@ class UnipKa(object):
                 
     def get_distribution(self, mol: Chem.Mol | str, /, *, pH: float | list[float] = 7.4) -> pd.DataFrame:
 
-        if isinstance(pH, float):
+        if isinstance(pH, (int, float)):
             pHs = [pH]
         else:
             pHs = pH
