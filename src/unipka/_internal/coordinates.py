@@ -40,12 +40,18 @@ def set_coordinates(mol: Chem.Mol, coords: np.ndarray, conf_id: int = 0):
 
 def mmff_optimise(
     mol: Chem.Mol, constrained_atom_idxs: list[int] | None = None
-) -> tuple[float, Chem.Mol]:
+) -> tuple[Chem.Mol, float | None]:
     """Optimize molecular geometry using MMFF force field."""
     # Define a force field with constraints on non-hydrogen atoms
-    ff = AllChem.MMFFGetMoleculeForceField(
-        mol, AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94")
-    )
+    properties = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94")
+    if properties is None:
+        logger.warning(f"MMFF properties could not be initialized for molecule {Chem.MolToSmiles(mol)} (possibly contains unsupported atoms like transition metals). Skipping MMFF optimization.")
+        return mol, None
+
+    ff = AllChem.MMFFGetMoleculeForceField(mol, properties)
+    if ff is None:
+        logger.warning(f"MMFF force field could not be initialized for molecule {Chem.MolToSmiles(mol)} (possibly contains unsupported atoms like transition metals). Skipping MMFF optimization.")
+        return mol, None
 
     if constrained_atom_idxs is not None:
         for atom in mol.GetAtoms():
