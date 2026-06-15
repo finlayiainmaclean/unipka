@@ -16,7 +16,7 @@ dependencies = [
     "numpy",
     "pandas",
     "seaborn",
-    "torch>2.3.0",
+    "torch",
     "rdkit",
     "anywidget",
     "matplotlib",
