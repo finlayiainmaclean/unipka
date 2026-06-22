@@ -3,12 +3,13 @@ import multiprocessing
 import os
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import Final, Sequence, Union
+from typing import Any, Final, Sequence, Union
 
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from scipy.spatial import distance_matrix
+
 from .dict import DICT, DICT_CHARGE, Dictionary
 
 logger = logging.getLogger(__name__)
@@ -20,12 +21,18 @@ def _detect_cpus() -> int:
     if env:
         return max(1, int(env))
     try:
-        return max(1, len(os.sched_getaffinity(0)))  # Linux: respects cpusets/cgroups
+        sched_getaffinity = getattr(os, "sched_getaffinity", None)
+        if sched_getaffinity is not None:
+            return max(1, len(sched_getaffinity(0)))  # Linux: respects cpusets/cgroups
     except AttributeError:
-        return max(1, multiprocessing.cpu_count())
+        pass
+    return max(1, multiprocessing.cpu_count())
 
 
 NUM_CPUS: Final[int] = _detect_cpus()
+
+UnimolFeatures = dict[str, np.ndarray]
+MolCoords = tuple[Sequence[str], np.ndarray, Sequence[int]]
 
 
 class ConformerGen(object):
@@ -33,7 +40,7 @@ class ConformerGen(object):
     Generate conformers for molecules given as SMILES strings or RDKit ``Chem.Mol`` instances.
     """
 
-    def __init__(self, **params):
+    def __init__(self, **params: Any) -> None:
         """
         Initializes the neural network model based on the provided model name and parameters.
 
@@ -49,7 +56,7 @@ class ConformerGen(object):
         cache_size = params.get("cache_size", 4096)
         self._cached_process_smi = lru_cache(maxsize=cache_size)(self._process_smi)
 
-    def _init_features(self, **params):
+    def _init_features(self, **params: Any) -> None:
         """
         Initializes the features of the ConformerGen object based on provided parameters.
 
@@ -69,7 +76,7 @@ class ConformerGen(object):
         self.charge_dictionary = Dictionary.load_from_str(DICT_CHARGE)
         self.charge_dictionary.add_symbol("[MASK]", is_special=True)
 
-    def single_process(self, mol_or_smi: Union[str, Chem.Mol]):
+    def single_process(self, mol_or_smi: Union[str, Chem.Mol]) -> UnimolFeatures:
         """
         Processes a single molecule (SMILES string or RDKit Mol) to generate conformers.
 
@@ -78,7 +85,9 @@ class ConformerGen(object):
         :raises ValueError: If the conformer generation method is unrecognized.
         """
         if self.method != "rdkit_random":
-            raise ValueError("Unknown conformer generation method: {}".format(self.method))
+            raise ValueError(
+                "Unknown conformer generation method: {}".format(self.method)
+            )
         if isinstance(mol_or_smi, str):
             return self._cached_process_smi(mol_or_smi)
         # Mols carrying a pre-computed conformer would lose their coords on a SMILES
@@ -88,11 +97,11 @@ class ConformerGen(object):
         smi = Chem.MolToSmiles(mol_or_smi, canonical=True, isomericSmiles=True)
         return self._cached_process_smi(smi)
 
-    def _process_smi(self, smi: str):
+    def _process_smi(self, smi: str) -> UnimolFeatures:
         mol = Chem.MolFromSmiles(smi)
         return self._process_mol(mol)
 
-    def _process_mol(self, mol: Chem.Mol):
+    def _process_mol(self, mol: Chem.Mol) -> UnimolFeatures:
         atoms, coordinates, charges = inner_mol2coords(
             mol, seed=self.seed, mode=self.mode, remove_hs=self.remove_hs
         )
@@ -106,9 +115,16 @@ class ConformerGen(object):
             remove_hs=self.remove_hs,
         )
 
-    def transform_raw(self, atoms_list, coordinates_list, charges_list):
+    def transform_raw(
+        self,
+        atoms_list: Sequence[Sequence[str]],
+        coordinates_list: Sequence[np.ndarray],
+        charges_list: Sequence[Sequence[int]],
+    ) -> list[UnimolFeatures]:
         inputs = []
-        for atoms, coordinates, charges in zip(atoms_list, coordinates_list, charges_list):
+        for atoms, coordinates, charges in zip(
+            atoms_list, coordinates_list, charges_list
+        ):
             inputs.append(
                 coords2unimol(
                     atoms,
@@ -122,7 +138,9 @@ class ConformerGen(object):
             )
         return inputs
 
-    def transform(self, mols_or_smis: Sequence[Union[str, Chem.Mol]]):
+    def transform(
+        self, mols_or_smis: Sequence[Union[str, Chem.Mol]]
+    ) -> list[UnimolFeatures]:
 
         n = len(mols_or_smis)
         logger.info(f"Start generating conformers for {n} molecules")
@@ -135,9 +153,19 @@ class ConformerGen(object):
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 inputs = list(ex.map(self.single_process, mols_or_smis))
         failed_cnt = np.mean([(item["src_coord"] == 0.0).all() for item in inputs])
-        logger.info("Succeed to generate conformers for {:.2f}% of molecules.".format((1 - failed_cnt) * 100))
-        failed_3d_cnt = np.mean([(item["src_coord"][:, 2] == 0.0).all() for item in inputs])
-        logger.info("Succeed to generate 3d conformers for {:.2f}% of molecules.".format((1 - failed_3d_cnt) * 100))
+        logger.info(
+            "Succeed to generate conformers for {:.2f}% of molecules.".format(
+                (1 - failed_cnt) * 100
+            )
+        )
+        failed_3d_cnt = np.mean(
+            [(item["src_coord"][:, 2] == 0.0).all() for item in inputs]
+        )
+        logger.info(
+            "Succeed to generate 3d conformers for {:.2f}% of molecules.".format(
+                (1 - failed_3d_cnt) * 100
+            )
+        )
         return inputs
 
 
@@ -153,7 +181,9 @@ def _etkdg_params(seed: int) -> AllChem.ETKDGv3:
     return p
 
 
-def inner_mol2coords(mol: Chem.Mol, seed=42, mode="fast", remove_hs=True):
+def inner_mol2coords(
+    mol: Chem.Mol, seed: int = 42, mode: str = "fast", remove_hs: bool = True
+) -> MolCoords:
     """
     Convert an RDKit molecule (with implicit Hs) into 3D coordinates per atom.
 
@@ -202,19 +232,24 @@ def inner_mol2coords(mol: Chem.Mol, seed=42, mode="fast", remove_hs=True):
         except Exception:
             print("Failed to generate conformer, replace with zeros.")
             coordinates = np.zeros((len(atoms), 3))
-    assert len(atoms) == len(coordinates), f"coordinates shape is not align with {label}"
+    assert len(atoms) == len(coordinates), (
+        f"coordinates shape is not align with {label}"
+    )
     if remove_hs:
         idx = [i for i, atom in enumerate(atoms) if atom != "H"]
         atoms_no_h = [atom for atom in atoms if atom != "H"]
         coordinates_no_h = coordinates[idx]
         charges_no_h = [charges[i] for i in idx]
-        assert len(atoms_no_h) == len(coordinates_no_h), f"coordinates shape is not align with {label}"
-        return atoms_no_h, coordinates_no_h, charges_no_h
-    else:
-        return atoms, coordinates, charges
+        assert len(atoms_no_h) == len(coordinates_no_h), (
+            f"coordinates shape is not align with {label}"
+        )
+        return list(atoms_no_h), coordinates_no_h, list(charges_no_h)
+    return list(atoms), coordinates, list(charges)
 
 
-def inner_smi2coords(smi, seed=42, mode="heavy", remove_hs=True):
+def inner_smi2coords(
+    smi: str, seed: int = 42, mode: str = "heavy", remove_hs: bool = True
+) -> MolCoords:
     """
     Same as :func:`inner_mol2coords` but takes a SMILES string.
     """
@@ -222,7 +257,12 @@ def inner_smi2coords(smi, seed=42, mode="heavy", remove_hs=True):
     return inner_mol2coords(mol, seed=seed, mode=mode, remove_hs=remove_hs)
 
 
-def inner_coords(atoms, coordinates, charges, remove_hs=True):
+def inner_coords(
+    atoms: Sequence[str],
+    coordinates: Sequence[Sequence[float]] | np.ndarray,
+    charges: Sequence[int],
+    remove_hs: bool = True,
+) -> MolCoords:
     """
     Processes a list of atoms and their corresponding coordinates to remove hydrogen atoms if specified.
     This function takes a list of atom symbols and their corresponding coordinates and optionally removes hydrogen atoms from the output. It includes assertions to ensure the integrity of the data and uses numpy for efficient processing of the coordinates.
@@ -244,13 +284,23 @@ def inner_coords(atoms, coordinates, charges, remove_hs=True):
         atoms_no_h = [atom for atom in atoms if atom != "H"]
         coordinates_no_h = coordinates[idx]
         charges_no_h = [charges[i] for i in idx]
-        assert len(atoms_no_h) == len(coordinates_no_h), "coordinates shape is not align with atoms"
-        return atoms_no_h, coordinates_no_h, charges_no_h
-    else:
-        return atoms, coordinates, charges
+        assert len(atoms_no_h) == len(coordinates_no_h), (
+            "coordinates shape is not align with atoms"
+        )
+        return list(atoms_no_h), coordinates_no_h, list(charges_no_h)
+    return list(atoms), coordinates, list(charges)
 
 
-def coords2unimol(atoms, coordinates, charges, dictionary, charge_dictionary, max_atoms=256, remove_hs=True, **params):
+def coords2unimol(
+    atoms: Sequence[str],
+    coordinates: Sequence[Sequence[float]] | np.ndarray,
+    charges: Sequence[int],
+    dictionary: Dictionary,
+    charge_dictionary: Dictionary,
+    max_atoms: int = 256,
+    remove_hs: bool = True,
+    **params: Any,
+) -> UnimolFeatures:
     """
     Converts atom symbols and coordinates into a unified molecular representation.
 
@@ -263,21 +313,29 @@ def coords2unimol(atoms, coordinates, charges, dictionary, charge_dictionary, ma
 
     :return: A dictionary containing the molecular representation with tokens, distances, coordinates, and edge types.
     """
-    atoms, coordinates, charges = inner_coords(atoms, coordinates, charges, remove_hs=remove_hs)
-    atoms = np.array(atoms)
+    atom_symbols, coordinates, atom_charges = inner_coords(
+        atoms, coordinates, charges, remove_hs=remove_hs
+    )
+    atom_array = np.array(atom_symbols)
     coordinates = np.array(coordinates).astype(np.float32)
-    charges = np.array(charges).astype(str)
+    charge_labels = np.array(atom_charges).astype(str)
     # cropping atoms and coordinates
-    if len(atoms) > max_atoms:
-        idx = np.random.choice(len(atoms), max_atoms, replace=False)
-        atoms = atoms[idx]
+    if len(atom_array) > max_atoms:
+        idx = np.random.choice(len(atom_array), max_atoms, replace=False)
+        atom_array = atom_array[idx]
         coordinates = coordinates[idx]
-        charges = charges[idx]
+        charge_labels = charge_labels[idx]
     # tokens padding
-    src_tokens = np.array([dictionary.bos()] + [dictionary.index(atom) for atom in atoms] + [dictionary.eos()])
+    src_tokens = np.array(
+        [dictionary.bos()]
+        + [dictionary.index(atom) for atom in atom_array]
+        + [dictionary.eos()]
+    )
     src_distance = np.zeros((len(src_tokens), len(src_tokens)))
     src_charges = np.array(
-        [charge_dictionary.bos()] + [charge_dictionary.index(charge) for charge in charges] + [charge_dictionary.eos()]
+        [charge_dictionary.bos()]
+        + [charge_dictionary.index(charge) for charge in charge_labels]
+        + [charge_dictionary.eos()]
     )
     # coordinates normalize & padding
     src_coord = coordinates - coordinates.mean(axis=0)
@@ -285,7 +343,9 @@ def coords2unimol(atoms, coordinates, charges, dictionary, charge_dictionary, ma
     # distance matrix
     src_distance = distance_matrix(src_coord, src_coord)
     # edge type
-    src_edge_type = src_tokens.reshape(-1, 1) * len(dictionary) + src_tokens.reshape(1, -1)
+    src_edge_type = src_tokens.reshape(-1, 1) * len(dictionary) + src_tokens.reshape(
+        1, -1
+    )
 
     return {
         "src_tokens": src_tokens.astype(int),

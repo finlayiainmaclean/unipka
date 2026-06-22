@@ -1,12 +1,12 @@
 import time
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import matplotlib.pyplot as plt
 from rdkit import Chem
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy.stats import kendalltau
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from tqdm import tqdm
 
 import unipka
@@ -37,20 +37,24 @@ def macro_pka_from_ensemble_free_energy(
             if smi in base_set:
                 g_b.append(g)
     if not g_a or not g_b:
-        raise ValueError("listed acid/base macrostates not all present in ensemble predictions")
+        raise ValueError(
+            "listed acid/base macrostates not all present in ensemble predictions"
+        )
     return log_sum_exp(g_a) - log_sum_exp(g_b) + TRANSLATE_PH
 
 
 def process_dataset(dataset_name, calc):
     """Process a single dataset and return results DataFrame with metrics"""
     print(f"\n--- Processing {dataset_name.upper()} ---")
-    
+
     exp_col = "pKa"
     pred_col = "predicted_pKa"
 
     # Load dataset
     url = f"https://raw.githubusercontent.com/dptech-corp/Uni-pKa/refs/heads/main/dataset/{dataset_name}.tsv"
-    df = pd.read_csv(url, sep="\t").rename(columns={"SMILES":"smiles", "TARGET": exp_col})
+    df = pd.read_csv(url, sep="\t").rename(
+        columns={"SMILES": "smiles", "TARGET": exp_col}
+    )
 
     # Enumerate + predict microstates via _predict_ensemble_free_energy (beam + charge limits from calc),
     # then macro pKa from listed acid/base pools (same log-sum-exp as get_macro_pka_from_macrostates).
@@ -78,16 +82,18 @@ def process_dataset(dataset_name, calc):
     df[pred_col] = predictions
     df["ensemble_wall_s"] = wall_s
     df["n_ensemble_microstates"] = n_microstates
-    
+
     # Clean data
     old_len = len(df)
     df.dropna(subset=[exp_col, pred_col], inplace=True)
     new_len = len(df)
 
-    print(f"Failed to generate pKa for {old_len-new_len} molecules in {dataset_name}")
+    print(f"Failed to generate pKa for {old_len - new_len} molecules in {dataset_name}")
 
     if df.empty:
-        print(f"No data to evaluate for {dataset_name} after dropping rows with missing pKa values.")
+        print(
+            f"No data to evaluate for {dataset_name} after dropping rows with missing pKa values."
+        )
         return None, {}
 
     # Calculate metrics
@@ -96,12 +102,7 @@ def process_dataset(dataset_name, calc):
     r2 = r2_score(df[exp_col], df[pred_col])
     tau, _ = kendalltau(df[exp_col], df[pred_col])
 
-    metrics = {
-        'mae': mae,
-        'rmse': rmse,
-        'r2': r2,
-        'tau': tau
-    }
+    metrics = {"mae": mae, "rmse": rmse, "r2": r2, "tau": tau}
 
     print(f"R²: {r2:.2f}")
     print(f"MAE: {mae:.2f}")
@@ -120,18 +121,24 @@ def process_dataset(dataset_name, calc):
 def plot_results(datasets_results, figsize=(18, 6)):
     """Create 1x3 subplot with results from all datasets"""
     fig, axes = plt.subplots(1, 3, figsize=figsize)
-    
+
     for idx, (dataset_name, (df, metrics)) in enumerate(datasets_results.items()):
         if df is None:
-            axes[idx].text(0.5, 0.5, f"No data for {dataset_name.upper()}", 
-                          ha='center', va='center', transform=axes[idx].transAxes)
+            axes[idx].text(
+                0.5,
+                0.5,
+                f"No data for {dataset_name.upper()}",
+                ha="center",
+                va="center",
+                transform=axes[idx].transAxes,
+            )
             axes[idx].set_title(dataset_name.upper())
             continue
-            
+
         ax = axes[idx]
         exp_col = "pKa"
         pred_col = "predicted_pKa"
-        
+
         # Scatter plot
         sns.scatterplot(
             data=df, x=pred_col, y=exp_col, alpha=0.6, edgecolor=None, ax=ax
@@ -140,7 +147,7 @@ def plot_results(datasets_results, figsize=(18, 6)):
         # Add diagonal (ideal prediction line)
         lims = [
             min(df[exp_col].min(), df[pred_col].min()),
-            max(df[exp_col].max(), df[pred_col].max())
+            max(df[exp_col].max(), df[pred_col].max()),
         ]
         ax.plot(lims, lims, "k--", linewidth=1)
         ax.set_xlim(lims)
@@ -154,19 +161,22 @@ def plot_results(datasets_results, figsize=(18, 6)):
             f"RMSE: {metrics['rmse']:.2f}"
         )
         ax.text(
-            0.95, 0.05, metrics_text,
+            0.95,
+            0.05,
+            metrics_text,
             transform=ax.transAxes,
             fontsize=10,
-            ha="right", va="bottom",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8)
+            ha="right",
+            va="bottom",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
         )
 
         ax.set_xlabel("Predicted pKa")
         ax.set_ylabel("Experimental pKa")
         ax.set_title(dataset_name.upper())
-        
+
         # Make plots square
-        ax.set_aspect('equal', adjustable='box')
+        ax.set_aspect("equal", adjustable="box")
 
     plt.tight_layout()
     return fig
@@ -174,11 +184,13 @@ def plot_results(datasets_results, figsize=(18, 6)):
 
 def main():
     calc = unipka.UnipKa()
-    print("Using default UnipKa (ensemble_beam_width=20, ensemble_formal_charge_limits=(-2, 2))")
+    print(
+        "Using default UnipKa (ensemble_beam_width=20, ensemble_formal_charge_limits=(-2, 2))"
+    )
 
     datasets = ["sampl6", "sampl7", "sampl8"]
     results = {}
-    
+
     # Process all datasets
     for dataset_name in datasets:
         try:
@@ -187,21 +199,23 @@ def main():
         except Exception as e:
             print(f"Error processing {dataset_name}: {repr(e)}")
             results[dataset_name] = (None, {})
-    
+
     # Create combined plot
     plot_results(results)
-    
+
     # Save figure
-    plt.savefig("benchmarks/sampl_results.png", dpi=300, bbox_inches='tight')
-    
+    plt.savefig("benchmarks/sampl_results.png", dpi=300, bbox_inches="tight")
+
     # Print summary
     print("\n--- SUMMARY ---")
     for dataset_name, (df, metrics) in results.items():
         if df is not None:
-            print(f"{dataset_name.upper()}: n={len(df)}, R²={metrics['r2']:.2f}, MAE={metrics['mae']:.2f}")
+            print(
+                f"{dataset_name.upper()}: n={len(df)}, R²={metrics['r2']:.2f}, MAE={metrics['mae']:.2f}"
+            )
         else:
             print(f"{dataset_name.upper()}: Failed to process")
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()

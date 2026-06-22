@@ -27,8 +27,6 @@ def test_transplant_coordinates_mcs_fallback_for_tautomers():
     query = Chem.MolFromSmiles("O=c1cccc[nH]1")
 
     out = transplant_coordinates(ref, query)
-    ref_coords = get_coordinates(ref)
-    out_coords = get_coordinates(out)
 
     ref_heavy = Chem.RemoveHs(ref)
     out_heavy = Chem.RemoveHs(out)
@@ -54,6 +52,7 @@ def test_get_distribution_with_tautomers_and_3d_coords():
 
 def test_mmff_optimise_unsupported_metals():
     from unipka._internal.coordinates import mmff_optimise
+
     mol = Chem.MolFromSmiles("[Fe]")
     conf = Chem.Conformer(1)
     conf.SetAtomPosition(0, (0.0, 0.0, 0.0))
@@ -71,8 +70,7 @@ def test_transplant_coordinates_unsupported_metals():
     ref.AddConformer(conf)
 
     query = Chem.MolFromSmiles("[Fe]")
-    
+
     out = transplant_coordinates(ref, query)
     assert out.GetNumConformers() == 1
     assert out.GetNumAtoms() == 1
-

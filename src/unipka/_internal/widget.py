@@ -1,5 +1,7 @@
 import anywidget
+import pandas as pd
 import traitlets
+
 
 class Widget(anywidget.AnyWidget):
     _esm = """
@@ -399,18 +401,19 @@ class Widget(anywidget.AnyWidget):
     
     export default { render };
     """
-    
+
     # Traitlets for data
     data = traitlets.Unicode("[]").tag(sync=True)
-    
-    def __init__(self, df, **kwargs):
+
+    def __init__(self, df: pd.DataFrame, **kwargs: object) -> None:
         super().__init__(**kwargs)
         self.df = df
         self.update_data()
-    
-    def update_data(self):
+
+    def update_data(self) -> None:
         """Convert DataFrame to JSON for JavaScript"""
         # Convert DataFrame to list of dictionaries
-        data_list = self.df.to_dict('records')
+        data_list = self.df.to_dict("records")
         import json
+
         self.data = json.dumps(data_list)

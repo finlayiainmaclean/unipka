@@ -25,10 +25,7 @@ from tqdm import tqdm
 from unipka import UnipKa
 from unipka._internal.template import get_ensemble
 
-
-DRUGBANK_SLIM_URL = (
-    "https://raw.githubusercontent.com/dhimmel/drugbank/refs/heads/gh-pages/data/drugbank-slim.tsv"
-)
+DRUGBANK_SLIM_URL = "https://raw.githubusercontent.com/dhimmel/drugbank/refs/heads/gh-pages/data/drugbank-slim.tsv"
 
 
 def load_sample_smiles(n_molecules: int = 10000, max_atoms: int = 50) -> pd.DataFrame:
@@ -71,7 +68,14 @@ def save_benchmark_plots(
 
     axes[1].scatter(nm, times_ms, alpha=0.35, s=22, c="darkslategray")
     if len(nm) > 1 and np.unique(nm).size > 1:
-        sns.regplot(x=nm, y=times_ms, ax=axes[1], scatter=False, color="crimson", line_kws={"lw": 2})
+        sns.regplot(
+            x=nm,
+            y=times_ms,
+            ax=axes[1],
+            scatter=False,
+            color="crimson",
+            line_kws={"lw": 2},
+        )
     axes[1].set_xlabel("Total microstates (summed over charge states)")
     axes[1].set_ylabel("Wall time per get_ensemble (ms)")
     axes[1].set_title("Enumeration size vs wall time")
@@ -140,11 +144,15 @@ def main() -> None:
     for _ in range(args.rounds):
         for smi in tqdm(smiles, desc="get_ensemble"):
             t0 = time.perf_counter()
-            ensemble = get_ensemble(Chem.MolFromSmiles(smi), pka.template_a2b, pka.template_b2a)
+            ensemble = get_ensemble(
+                Chem.MolFromSmiles(smi), pka.template_a2b, pka.template_b2a
+            )
             dt = time.perf_counter() - t0
             times_s.append(dt)
             sizes.append(len(ensemble))
-            n_microstates.append(sum(len(microstates) for microstates in ensemble.values()))
+            n_microstates.append(
+                sum(len(microstates) for microstates in ensemble.values())
+            )
     n = len(times_s)
     mean_s = statistics.mean(times_s)
     print()

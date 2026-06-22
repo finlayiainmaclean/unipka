@@ -1,16 +1,17 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from scipy.stats import kendalltau
-from unipka._internal.solvation import get_solvation_energy
-from rdkit import Chem
 import ray
-from unipka.unipka import UnipKa
-from sklearn.linear_model import LogisticRegression, LinearRegression
+from rdkit import Chem
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    roc_auc_score,
+    roc_curve,
+)
 from sklearn.model_selection import StratifiedKFold, cross_val_score
-from sklearn.metrics import roc_auc_score, roc_curve
+
+from unipka._internal.solvation import get_solvation_energy
+from unipka.unipka import UnipKa
 
 
 def calculate_corrected_solvation_energy(mol):
@@ -21,85 +22,86 @@ def calculate_corrected_solvation_energy(mol):
     logD = calc.get_logd(mol, pH=7.4)
     return G_solv, sp, logD
 
+
 def _calculate_corrected_solvation_energy(mol):
-    try: 
+    try:
         return calculate_corrected_solvation_energy(mol)
-    except:
+    except Exception:
         print(Chem.MolToSmiles(mol))
         return None, None, None
 
 
-def analyze_brain_penetration(df, kpuu_column='Kpuu'):
+def analyze_brain_penetration(df, kpuu_column="Kpuu"):
     """
     Analyze brain penetration using solvation energy descriptors
-    
+
     Parameters:
     df: DataFrame with columns 'G_solv', 'sp', and Kp_uu values
     kpuu_column: name of the column containing Kp,uu values
     """
-    
+
     # Create binary brain-penetrant class (Kp,uu > 0.3, non-log transformed)
     y_binary = (df[kpuu_column] > 0.3).astype(int)
-    
-    print(f"Brain-penetrant compounds: {y_binary.sum()} / {len(y_binary)} ({100*y_binary.mean():.1f}%)")
 
-    X0 = df[['G_solv']].values
-    X1 = df[['G_solv', 'sp']].values
-    X2 = df[['G_solv', 'logD']].values
-    X3 = df[['G_solv', 'logD','sp']].values
+    print(
+        f"Brain-penetrant compounds: {y_binary.sum()} / {len(y_binary)} ({100 * y_binary.mean():.1f}%)"
+    )
 
-    
+    X0 = df[["G_solv"]].values
+    X1 = df[["G_solv", "sp"]].values
+    X2 = df[["G_solv", "logD"]].values
+    X3 = df[["G_solv", "logD", "sp"]].values
+
     # 5-fold stratified cross-validation
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    
+
     # Train and evaluate models
     models = {
-        'G_solv': X0,
-        'G_solv + SP': X1,
-        'G_solv + logD': X2,
-        'G_solv + logD + SP': X3,
-
+        "G_solv": X0,
+        "G_solv + SP": X1,
+        "G_solv + logD": X2,
+        "G_solv + logD + SP": X3,
     }
-    
+
     results = {}
-    
+
     for name, X in models.items():
         # Create pipeline with scaling and logistic regression
         pipeline = LogisticRegression()
-        
+
         # Cross-validation ROC-AUC scores
-        cv_scores = cross_val_score(pipeline, X, y_binary, cv=cv, scoring='roc_auc')
-        
+        cv_scores = cross_val_score(pipeline, X, y_binary, cv=cv, scoring="roc_auc")
+
         # Fit pipeline on full dataset for ROC curve
         pipeline.fit(X, y_binary)
         y_pred_proba = pipeline.predict_proba(X)[:, 1]
-        
+
         # Store results
         results[name] = {
-            'cv_scores': cv_scores,
-            'mean_auc': cv_scores.mean(),
-            'std_auc': cv_scores.std(),
-            'y_pred_proba': y_pred_proba,
-            'model': pipeline  # Store the full pipeline
+            "cv_scores": cv_scores,
+            "mean_auc": cv_scores.mean(),
+            "std_auc": cv_scores.std(),
+            "y_pred_proba": y_pred_proba,
+            "model": pipeline,  # Store the full pipeline
         }
-        
+
         print(f"\n{name}:")
         print(f"  CV ROC-AUC: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
         print(f"  CV scores: {[f'{score:.3f}' for score in cv_scores]}")
-    
+
     # Plot ROC curves
     plt.figure(figsize=(8, 6))
-    
+
     for name, result in results.items():
-        fpr, tpr, _ = roc_curve(y_binary, result['y_pred_proba'])
-        auc_score = roc_auc_score(y_binary, result['y_pred_proba'])
-        
+        fpr, tpr, _ = roc_curve(y_binary, result["y_pred_proba"])
+        auc_score = roc_auc_score(y_binary, result["y_pred_proba"])
+
         plt.plot(fpr, tpr, label=f"{name} (AUC = {auc_score:.3f})")
-    
-    plt.plot([0, 1], [0, 1], 'k--', alpha=0.5)
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('ROC Curves: Brain Penetration Prediction')
+
+    plt.plot([0, 1], [0, 1], "k--", alpha=0.5)
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curves: Brain Penetration Prediction")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -107,54 +109,50 @@ def analyze_brain_penetration(df, kpuu_column='Kpuu'):
     plt.close()
 
 
-
 def process_dataset():
     """Process a single dataset and return results DataFrame with metrics"""
-    print(f"\n--- Processing Kpuu ---")
-    
-    df = pd.read_csv("benchmarks/kpuu.csv")
-    df.Kpuu = df.Kpuu.apply(lambda x: float(x.replace(",",".")))
+    print("\n--- Processing Kpuu ---")
 
-    df['mol']  = [Chem.MolFromSmiles(s) for s in df['canonical SMILES']]
-    df = df.dropna(subset=['mol'])
+    df = pd.read_csv("benchmarks/kpuu.csv")
+    df.Kpuu = df.Kpuu.apply(lambda x: float(x.replace(",", ".")))
+
+    df["mol"] = [Chem.MolFromSmiles(s) for s in df["canonical SMILES"]]
+    df = df.dropna(subset=["mol"])
 
     ray_func = ray.remote(_calculate_corrected_solvation_energy)
     results = ray.get([ray_func.remote(smi) for smi in df.mol])
-    df['G_solv'], df['sp'], df['logD'] = zip(*results)
-    df = df.dropna(subset=['G_solv'])
-    
+    df["G_solv"], df["sp"], df["logD"] = zip(*results)
+    df = df.dropna(subset=["G_solv"])
+
     # Clean data
     old_len = len(df)
     df.dropna(subset=["G_solv"], inplace=True)
     new_len = len(df)
 
-    print(f"Failed to generate pKa for {old_len-new_len} molecules in Kpuu")
+    print(f"Failed to generate pKa for {old_len - new_len} molecules in Kpuu")
 
     if df.empty:
-        print(f"No data to evaluate for Kpuu after dropping rows with missing values.")
+        print("No data to evaluate for Kpuu after dropping rows with missing values.")
         return None, {}
 
     return df
 
-def main():    
-    
+
+def main():
+
     df = process_dataset()
 
     clf = LogisticRegression()
-    X = df[['G_solv','logD','sp']].values
+    X = df[["G_solv", "logD", "sp"]].values
     y = df.Kpuu > 0.3
     clf.fit(X, y)
 
     # Save weights
-    weights = {
-        "coef": clf.coef_.copy(),
-        "intercept": clf.intercept_.copy()
-    }
+    weights = {"coef": clf.coef_.copy(), "intercept": clf.intercept_.copy()}
 
     np.savez("src/unipka/data/weights.kpuu.npz", **weights)
     analyze_brain_penetration(df)
 
 
-
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
