@@ -1,13 +1,15 @@
 [build-system]
 requires = ["setuptools>=61", "wheel", "build"]
 build-backend = "setuptools.build_meta"
+
 [project]
 name = "unipka"
 version = "0.0.7"
 description = "Unoffical wrapper around UnipKa"
-authors = [{name = "Finlay MacLean"}]
+authors = [{ name = "Finlay MacLean" }]
 readme = "README.md"
-license = {text = "MIT"}
+license = { text = "MIT" }
+requires-python = ">=3.12"
 dependencies = [
     "temporalio",
     "requests",
@@ -22,16 +24,83 @@ dependencies = [
     "matplotlib",
     "scikit-learn",
     "tqdm",
-
 ]
 
+[project.urls]
+homepage = "https://github.com/finlayiainmaclean/unipka"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools]
+package-data = { "unipka" = ["data/*"] }
+
+[dependency-groups]
+tests = [
+    "pytest>=9.1.1",
+    "pytest-cov>=6.1.0",
+    "ty>=0.0.49,<0.0.50",
+]
+dev = [
+    "pre-commit>=4.1.0",
+    "ruff==0.15.18",
+    "ty>=0.0.49,<0.0.50",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 
-[tool.setuptools]
-package-data = { "unipka" = ["data/*"] }
+[tool.ruff.lint.isort]
+known-first-party = ["unipka"]
+
+[tool.ruff.lint]
+extend-select = [
+    "I", # Import sorting
+    "ANN", # Type annotations
+    "D101", # Class missing docstring
+    "D102", # Method missing docstring
+    "D103", # Function missing docstring
+    "D105", # Magic method missing docstring
+    "D107", # Constructor missing docstring
+    "PTH123", # Avoid builtin open
+    "W505", # Docstring line too long
+    "RET504", # Unnecessary assignment before return
+    "PIE790", # Unnecessary pass statement
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/**" = [
+    "ANN401",
+]
+
+"benchmarks/**" = [
+    "D101", "D102", "D103", "D105", "D107",
+    "ANN001", "ANN003", "ANN201", "ANN202", "ANN204", "ANN206",
+    "TCH001", "TCH002", "TCH003",
+    "ARG001", "FBT001", "FBT002",
+]
+
+"tests/**" = [
+    "D101", "D102", "D103", "D105", "D107",
+    "ANN001", "ANN003", "ANN201", "ANN202", "ANN204", "ANN206",
+    "TCH001", "TCH002", "TCH003",
+    "ARG001", "FBT001", "FBT002",
+]
+
+[tool.ty.environment]
+python = "./.venv"
+python-version = "3.12"
+
+[tool.ty.analysis]
+allowed-unresolved-imports = ["rdkit.RDLogger"]
+replace-imports-with-any = [
+    # RDKit: stubs are incomplete for dynamically-loaded descriptors and features
+    "rdkit.Chem.**",
+    # Torch: incomplete stubs for many runtime attributes
+    "torch",
+    "torch.**",
+    # Pandas: stubs reject common list-of-strings column definitions
+    "pandas",
+    "pandas.**",
+]

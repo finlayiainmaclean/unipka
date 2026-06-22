@@ -1,4 +1,7 @@
 import logging
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from typing import IO, Self
 
 import numpy as np
 
@@ -52,51 +55,59 @@ class Dictionary:
     def __init__(
         self,
         *,  # begin keyword-only arguments
-        bos="[CLS]",
-        pad="[PAD]",
-        eos="[SEP]",
-        unk="[UNK]",
-        extra_special_symbols=None,
-    ):
+        bos: str = "[CLS]",
+        pad: str = "[PAD]",
+        eos: str = "[SEP]",
+        unk: str = "[UNK]",
+        extra_special_symbols: Iterable[str] | None = None,
+    ) -> None:
         self.bos_word, self.unk_word, self.pad_word, self.eos_word = bos, unk, pad, eos
-        self.symbols = []
-        self.count = []
-        self.indices = {}
-        self.specials = set()
+        self.symbols: list[str] = []
+        self.count: list[int] = []
+        self.indices: dict[str, int] = {}
+        self.specials: set[str] = set()
         self.specials.add(bos)
         self.specials.add(unk)
         self.specials.add(pad)
         self.specials.add(eos)
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Dictionary):
+            return NotImplemented
         return self.indices == other.indices
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> str:
         if idx < len(self.symbols):
             return self.symbols[idx]
         return self.unk_word
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Returns the number of symbols in the dictionary"""
         return len(self.symbols)
 
-    def __contains__(self, sym):
+    def __contains__(self, sym: str) -> bool:
         return sym in self.indices
 
-    def vec_index(self, a):
+    def vec_index(self, a: np.ndarray) -> np.ndarray:
         return np.vectorize(self.index)(a)
 
-    def index(self, sym):
+    def index(self, sym: str) -> int:
         """Returns the index of the specified symbol"""
         assert isinstance(sym, str)
         if sym in self.indices:
             return self.indices[sym]
         return self.indices[self.unk_word]
 
-    def special_index(self):
+    def special_index(self) -> list[int]:
         return [self.index(x) for x in self.specials]
 
-    def add_symbol(self, word, n=1, overwrite=False, is_special=False):
+    def add_symbol(
+        self,
+        word: str,
+        n: int = 1,
+        overwrite: bool = False,
+        is_special: bool = False,
+    ) -> int:
         """Adds a word to the dictionary"""
         if is_special:
             self.specials.add(word)
@@ -104,31 +115,30 @@ class Dictionary:
             idx = self.indices[word]
             self.count[idx] = self.count[idx] + n
             return idx
-        else:
-            idx = len(self.symbols)
-            self.indices[word] = idx
-            self.symbols.append(word)
-            self.count.append(n)
-            return idx
+        idx = len(self.symbols)
+        self.indices[word] = idx
+        self.symbols.append(word)
+        self.count.append(n)
+        return idx
 
-    def bos(self):
+    def bos(self) -> int:
         """Helper to get index of beginning-of-sentence symbol"""
         return self.index(self.bos_word)
 
-    def pad(self):
+    def pad(self) -> int:
         """Helper to get index of pad symbol"""
         return self.index(self.pad_word)
 
-    def eos(self):
+    def eos(self) -> int:
         """Helper to get index of end-of-sentence symbol"""
         return self.index(self.eos_word)
 
-    def unk(self):
+    def unk(self) -> int:
         """Helper to get index of unk symbol"""
         return self.index(self.unk_word)
 
     @classmethod
-    def load(cls, f):
+    def load(cls, f: str | IO[str]) -> Self:
         """Loads the dictionary from a text file with the format:
 
         ```
@@ -142,12 +152,12 @@ class Dictionary:
         return d
 
     @classmethod
-    def load_from_str(cls, s):
+    def load_from_str(cls, s: str) -> Self:
         d = cls()
         d.add_from_lines(s.split("\n"))
         return d
 
-    def add_from_lines(self, lines):
+    def add_from_lines(self, lines: Sequence[str]) -> None:
         for line_idx, line in enumerate(lines):
             try:
                 splits = line.rstrip().rsplit(" ", 1)
@@ -169,21 +179,27 @@ class Dictionary:
                 else:
                     self.add_symbol(word, n=count, overwrite=overwrite)
             except ValueError:
-                raise ValueError("Incorrect dictionary format, expected '<token> <cnt> [flags]'")
+                raise ValueError(
+                    "Incorrect dictionary format, expected '<token> <cnt> [flags]'"
+                )
 
-    def add_from_file(self, f):
+    def add_from_file(self, f: str | IO[str]) -> None:
         """
         Loads a pre-existing dictionary from a text file and adds its symbols
         to this instance.
         """
         if isinstance(f, str):
             try:
-                with open(f, "r", encoding="utf-8") as fd:
+                with Path(f).open("r", encoding="utf-8") as fd:
                     self.add_from_file(fd)
             except FileNotFoundError as fnfe:
                 raise fnfe
             except UnicodeError:
-                raise Exception("Incorrect encoding detected in {}, please rebuild the dataset".format(f))
+                raise Exception(
+                    "Incorrect encoding detected in {}, please rebuild the dataset".format(
+                        f
+                    )
+                )
             return
 
         lines = f.readlines()

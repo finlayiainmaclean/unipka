@@ -21,6 +21,7 @@ wheels/
 *.egg
 MANIFEST
 .ruff_cache/
+.ty_cache/
 .claude/
 
 # pytest

@@ -1,8 +1,9 @@
-import argparse
 import logging
+from argparse import Namespace
+from typing import Any
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 
 from ..dict import DICT, DICT_CHARGE, Dictionary
 from .transformer import TransformerEncoderWithPair, get_activation_fn
@@ -10,7 +11,7 @@ from .transformer import TransformerEncoderWithPair, get_activation_fn
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-torch.serialization.add_safe_globals([argparse.Namespace])
+torch.serialization.add_safe_globals([Namespace])
 
 BACKBONE = {
     "transformer": TransformerEncoderWithPair,
@@ -37,7 +38,12 @@ class UniMolModel(nn.Module):
         - classification_head: The final classification head of the model.
     """
 
-    def __init__(self, model_path, output_dim=2, **params):
+    def __init__(
+        self,
+        model_path: str | None,
+        output_dim: int = 2,
+        **params: Any,
+    ) -> None:
         """
         Initializes the UniMolModel with specified parameters and data type.
 
@@ -55,12 +61,18 @@ class UniMolModel(nn.Module):
         self.dictionary = Dictionary.load_from_str(DICT)
         self.mask_idx = self.dictionary.add_symbol("[MASK]", is_special=True)
         self.padding_idx = self.dictionary.pad()
-        self.embed_tokens = nn.Embedding(len(self.dictionary), self.args.encoder_embed_dim, self.padding_idx)
+        self.embed_tokens = nn.Embedding(
+            len(self.dictionary), self.args.encoder_embed_dim, self.padding_idx
+        )
         self.charge_dictionary = Dictionary.load_from_str(DICT_CHARGE)
-        self.charge_mask_idx = self.charge_dictionary.add_symbol("[MASK]", is_special=True)
+        self.charge_mask_idx = self.charge_dictionary.add_symbol(
+            "[MASK]", is_special=True
+        )
         self.charge_padding_idx = self.charge_dictionary.pad()
         self.embed_charges = nn.Embedding(
-            len(self.charge_dictionary), self.args.encoder_embed_dim, self.charge_padding_idx
+            len(self.charge_dictionary),
+            self.args.encoder_embed_dim,
+            self.charge_padding_idx,
         )
         self.encoder = BACKBONE[self.args.backbone](
             encoder_layers=self.args.encoder_layers,
@@ -77,7 +89,9 @@ class UniMolModel(nn.Module):
         )
         K = 128
         n_edge_type = len(self.dictionary) * len(self.dictionary)
-        self.gbf_proj = NonLinearHead(K, self.args.encoder_attention_heads, self.args.activation_fn)
+        self.gbf_proj = NonLinearHead(
+            K, self.args.encoder_attention_heads, self.args.activation_fn
+        )
         if self.args.kernel == "gaussian":
             self.gbf = GaussianLayer(K, n_edge_type)
         self.classification_heads = nn.ModuleDict()
@@ -90,7 +104,7 @@ class UniMolModel(nn.Module):
         )
         self.load_pretrained_weights(path=self.pretrain_path)
 
-    def load_pretrained_weights(self, path):
+    def load_pretrained_weights(self, path: str | None) -> None:
         """
         Loads pretrained weights into the model.
 
@@ -98,15 +112,23 @@ class UniMolModel(nn.Module):
         """
         if path is not None:
             logger.info("Loading pretrained weights from {}".format(path))
-            state_dict = torch.load(path, weights_only=False, map_location=lambda storage, loc: storage)
+            state_dict = torch.load(
+                path, weights_only=False, map_location=lambda storage, loc: storage
+            )
             errors = self.load_state_dict(state_dict["model"], strict=True)
             if errors.missing_keys:
-                logger.warning("Error in loading model state, missing_keys " + str(errors.missing_keys))
+                logger.warning(
+                    "Error in loading model state, missing_keys "
+                    + str(errors.missing_keys)
+                )
             if errors.unexpected_keys:
-                logger.warning("Error in loading model state, unexpected_keys " + str(errors.unexpected_keys))
+                logger.warning(
+                    "Error in loading model state, unexpected_keys "
+                    + str(errors.unexpected_keys)
+                )
 
     @classmethod
-    def build_model(cls, args):
+    def build_model(cls, args: Any) -> "UniMolModel":
         """
         Class method to build a new instance of the UniMolModel.
 
@@ -117,15 +139,15 @@ class UniMolModel(nn.Module):
 
     def forward(
         self,
-        src_tokens,
-        src_charges,
-        src_distance,
-        src_coord,
-        src_edge_type,
-        return_repr=False,
-        return_atomic_reprs=False,
-        **kwargs,
-    ):
+        src_tokens: Tensor,
+        src_charges: Tensor,
+        src_distance: Tensor,
+        src_coord: Tensor,
+        src_edge_type: Tensor,
+        return_repr: bool = False,
+        return_atomic_reprs: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """
         Defines the forward pass of the model.
 
@@ -153,14 +175,13 @@ class UniMolModel(nn.Module):
         charges_emb = self.embed_charges(src_charges)
         x += charges_emb
 
-        def get_dist_features(dist, et):
+        def get_dist_features(dist: Tensor, et: Tensor) -> Tensor:
             n_node = dist.size(-1)
             gbf_feature = self.gbf(dist, et)
             gbf_result = self.gbf_proj(gbf_feature)
             graph_attn_bias = gbf_result
             graph_attn_bias = graph_attn_bias.permute(0, 3, 1, 2).contiguous()
-            graph_attn_bias = graph_attn_bias.view(-1, n_node, n_node)
-            return graph_attn_bias
+            return graph_attn_bias.view(-1, n_node, n_node)
 
         graph_attn_bias = get_dist_features(src_distance, src_edge_type)
         (
@@ -176,7 +197,9 @@ class UniMolModel(nn.Module):
         filtered_tensors = []
         filtered_coords = []
         for tokens, coord in zip(src_tokens, src_coord):
-            filtered_tensor = tokens[(tokens != 0) & (tokens != 1) & (tokens != 2)]  # filter out BOS(0), EOS(1), PAD(2)
+            filtered_tensor = tokens[
+                (tokens != 0) & (tokens != 1) & (tokens != 2)
+            ]  # filter out BOS(0), EOS(1), PAD(2)
             filtered_coord = coord[(tokens != 0) & (tokens != 1) & (tokens != 2)]
             filtered_tensors.append(filtered_tensor)
             filtered_coords.append(filtered_coord)
@@ -203,10 +226,11 @@ class UniMolModel(nn.Module):
         if return_repr and not return_atomic_reprs:
             return {"cls_repr": cls_repr}
 
-        logits = self.classification_heads[self.head_name](cls_repr)
-        return logits
+        return self.classification_heads[self.head_name](cls_repr)
 
-    def batch_collate_fn(self, samples):
+    def batch_collate_fn(
+        self, samples: list[tuple[dict[str, Any], Any]]
+    ) -> tuple[dict[str, Tensor], Tensor | None]:
         """
         Custom collate function for batch processing non-MOF data.
 
@@ -217,15 +241,28 @@ class UniMolModel(nn.Module):
         batch = {}
         for k in samples[0][0].keys():
             if k == "src_coord":
-                v = pad_coords([torch.tensor(s[0][k]).float() for s in samples], pad_idx=0.0)
+                v = pad_coords(
+                    [torch.tensor(s[0][k]).float() for s in samples], pad_idx=0.0
+                )
             elif k == "src_edge_type":
-                v = pad_2d([torch.tensor(s[0][k]).long() for s in samples], pad_idx=self.padding_idx)
+                v = pad_2d(
+                    [torch.tensor(s[0][k]).long() for s in samples],
+                    pad_idx=self.padding_idx,
+                )
             elif k == "src_distance":
-                v = pad_2d([torch.tensor(s[0][k]).float() for s in samples], pad_idx=0.0)
+                v = pad_2d(
+                    [torch.tensor(s[0][k]).float() for s in samples], pad_idx=0.0
+                )
             elif k == "src_tokens":
-                v = pad_1d_tokens([torch.tensor(s[0][k]).long() for s in samples], pad_idx=self.padding_idx)
+                v = pad_1d_tokens(
+                    [torch.tensor(s[0][k]).long() for s in samples],
+                    pad_idx=self.padding_idx,
+                )
             elif k == "src_charges":
-                v = pad_1d_tokens([torch.tensor(s[0][k]).long() for s in samples], pad_idx=self.charge_padding_idx)
+                v = pad_1d_tokens(
+                    [torch.tensor(s[0][k]).long() for s in samples],
+                    pad_idx=self.charge_padding_idx,
+                )
             batch[k] = v
         try:
             label = torch.tensor([s[1] for s in samples])
@@ -239,12 +276,12 @@ class ClassificationHead(nn.Module):
 
     def __init__(
         self,
-        input_dim,
-        inner_dim,
-        num_classes,
-        activation_fn,
-        pooler_dropout,
-    ):
+        input_dim: int,
+        inner_dim: int,
+        num_classes: int,
+        activation_fn: str,
+        pooler_dropout: float,
+    ) -> None:
         """
         Initialize the classification head.
 
@@ -260,7 +297,7 @@ class ClassificationHead(nn.Module):
         self.dropout = nn.Dropout(p=pooler_dropout)
         self.out_proj = nn.Linear(inner_dim, num_classes)
 
-    def forward(self, features, **kwargs):
+    def forward(self, features: Tensor, **kwargs: Any) -> Tensor:
         """
         Forward pass for the classification head.
 
@@ -273,8 +310,7 @@ class ClassificationHead(nn.Module):
         x = self.dense(x)
         x = self.activation_fn(x)
         x = self.dropout(x)
-        x = self.out_proj(x)
-        return x
+        return self.out_proj(x)
 
 
 class NonLinearHead(nn.Module):
@@ -290,11 +326,11 @@ class NonLinearHead(nn.Module):
 
     def __init__(
         self,
-        input_dim,
-        out_dim,
-        activation_fn,
-        hidden=None,
-    ):
+        input_dim: int,
+        out_dim: int,
+        activation_fn: str,
+        hidden: int | None = None,
+    ) -> None:
         """
         Initializes the NonLinearHead module.
 
@@ -309,7 +345,7 @@ class NonLinearHead(nn.Module):
         self.linear2 = nn.Linear(hidden, out_dim)
         self.activation_fn = get_activation_fn(activation_fn)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         """
         Forward pass of the NonLinearHead.
 
@@ -319,12 +355,11 @@ class NonLinearHead(nn.Module):
         """
         x = self.linear1(x)
         x = self.activation_fn(x)
-        x = self.linear2(x)
-        return x
+        return self.linear2(x)
 
 
 @torch.jit.script
-def gaussian(x, mean, std):
+def gaussian(x: Tensor, mean: Tensor, std: Tensor) -> Tensor:
     """
     Gaussian function implemented for PyTorch tensors.
 
@@ -349,7 +384,7 @@ class GaussianLayer(nn.Module):
         - mul, bias: Embeddings for scaling and bias parameters.
     """
 
-    def __init__(self, K=128, edge_types=1024):
+    def __init__(self, K: int = 128, edge_types: int = 1024) -> None:
         """
         Initializes the GaussianLayer module.
 
@@ -369,7 +404,7 @@ class GaussianLayer(nn.Module):
         nn.init.constant_(self.bias.weight, 0)
         nn.init.constant_(self.mul.weight, 1)
 
-    def forward(self, x, edge_type):
+    def forward(self, x: Tensor, edge_type: Tensor) -> Tensor:
         """
         Forward pass of the GaussianLayer.
 
@@ -387,34 +422,34 @@ class GaussianLayer(nn.Module):
         return gaussian(x.float(), mean, std).type_as(self.means.weight)
 
 
-def molecule_architecture():
-    args = argparse.ArgumentParser()
-    args.encoder_layers = getattr(args, "encoder_layers", 15)
-    args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 512)
-    args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 2048)
-    args.encoder_attention_heads = getattr(args, "encoder_attention_heads", 64)
-    args.dropout = getattr(args, "dropout", 0.1)
-    args.emb_dropout = getattr(args, "emb_dropout", 0.1)
-    args.attention_dropout = getattr(args, "attention_dropout", 0.1)
-    args.activation_dropout = getattr(args, "activation_dropout", 0.0)
-    args.pooler_dropout = getattr(args, "pooler_dropout", 0.0)
-    args.max_seq_len = getattr(args, "max_seq_len", 512)
-    args.activation_fn = getattr(args, "activation_fn", "gelu")
-    args.pooler_activation_fn = getattr(args, "pooler_activation_fn", "tanh")
-    args.post_ln = getattr(args, "post_ln", False)
-    args.backbone = getattr(args, "backbone", "transformer")
-    args.kernel = getattr(args, "kernel", "gaussian")
-    args.delta_pair_repr_norm_loss = getattr(args, "delta_pair_repr_norm_loss", -1.0)
-    return args
+def molecule_architecture() -> Namespace:
+    return Namespace(
+        encoder_layers=15,
+        encoder_embed_dim=512,
+        encoder_ffn_embed_dim=2048,
+        encoder_attention_heads=64,
+        dropout=0.1,
+        emb_dropout=0.1,
+        attention_dropout=0.1,
+        activation_dropout=0.0,
+        pooler_dropout=0.0,
+        max_seq_len=512,
+        activation_fn="gelu",
+        pooler_activation_fn="tanh",
+        post_ln=False,
+        backbone="transformer",
+        kernel="gaussian",
+        delta_pair_repr_norm_loss=-1.0,
+    )
 
 
 def pad_1d_tokens(
-    values,
-    pad_idx,
-    left_pad=False,
-    pad_to_length=None,
-    pad_to_multiple=1,
-):
+    values: list[Tensor],
+    pad_idx: float,
+    left_pad: bool = False,
+    pad_to_length: int | None = None,
+    pad_to_multiple: int = 1,
+) -> Tensor:
     """
     padding one dimension tokens inputs.
 
@@ -433,7 +468,7 @@ def pad_1d_tokens(
         size = int(((size - 0.1) // pad_to_multiple + 1) * pad_to_multiple)
     res = values[0].new(len(values), size).fill_(pad_idx)
 
-    def copy_tensor(src, dst):
+    def copy_tensor(src: Tensor, dst: Tensor) -> None:
         assert dst.numel() == src.numel()
         dst.copy_(src)
 
@@ -443,12 +478,12 @@ def pad_1d_tokens(
 
 
 def pad_2d(
-    values,
-    pad_idx,
-    left_pad=False,
-    pad_to_length=None,
-    pad_to_multiple=1,
-):
+    values: list[Tensor],
+    pad_idx: float,
+    left_pad: bool = False,
+    pad_to_length: int | None = None,
+    pad_to_multiple: int = 1,
+) -> Tensor:
     """
     padding two dimension tensor inputs.
 
@@ -467,22 +502,27 @@ def pad_2d(
         size = int(((size - 0.1) // pad_to_multiple + 1) * pad_to_multiple)
     res = values[0].new(len(values), size, size).fill_(pad_idx)
 
-    def copy_tensor(src, dst):
+    def copy_tensor(src: Tensor, dst: Tensor) -> None:
         assert dst.numel() == src.numel()
         dst.copy_(src)
 
     for i, v in enumerate(values):
-        copy_tensor(v, res[i][size - len(v) :, size - len(v) :] if left_pad else res[i][: len(v), : len(v)])
+        copy_tensor(
+            v,
+            res[i][size - len(v) :, size - len(v) :]
+            if left_pad
+            else res[i][: len(v), : len(v)],
+        )
     return res
 
 
 def pad_coords(
-    values,
-    pad_idx,
-    left_pad=False,
-    pad_to_length=None,
-    pad_to_multiple=1,
-):
+    values: list[Tensor],
+    pad_idx: float,
+    left_pad: bool = False,
+    pad_to_length: int | None = None,
+    pad_to_multiple: int = 1,
+) -> Tensor:
     """
     padding two dimension tensor coords which the third dimension is 3.
 
@@ -500,7 +540,7 @@ def pad_coords(
         size = int(((size - 0.1) // pad_to_multiple + 1) * pad_to_multiple)
     res = values[0].new(len(values), size, 3).fill_(pad_idx)
 
-    def copy_tensor(src, dst):
+    def copy_tensor(src: Tensor, dst: Tensor) -> None:
         assert dst.numel() == src.numel()
         dst.copy_(src)
 

@@ -12,7 +12,9 @@ def _canon_key(mol: Chem.Mol) -> str:
     return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
 
 
-def tautomers_of_mol(mol: Chem.Mol, *, max_tautomers: Optional[int] = None) -> list[Chem.Mol]:
+def tautomers_of_mol(
+    mol: Chem.Mol, *, max_tautomers: Optional[int] = None
+) -> list[Chem.Mol]:
     """
     Return distinct tautomeric forms of ``mol`` (canonical isomeric SMILES deduped),
     including the input tautomer when enumeration succeeds. On failure, returns ``[mol]``.

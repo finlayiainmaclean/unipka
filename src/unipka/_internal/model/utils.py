@@ -1,8 +1,17 @@
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
 
 
-def softmax_dropout(input, dropout_prob, is_training=True, mask=None, bias=None, inplace=True):
+def softmax_dropout(
+    input: torch.Tensor,
+    dropout_prob: float,
+    is_training: bool = True,
+    mask: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    inplace: bool = True,
+) -> torch.Tensor:
     """softmax dropout, and mask, bias are optional.
     Args:
         input (torch.Tensor): input tensor
@@ -25,7 +34,7 @@ def softmax_dropout(input, dropout_prob, is_training=True, mask=None, bias=None,
     return F.dropout(F.softmax(input, dim=-1), p=dropout_prob, training=is_training)
 
 
-def get_activation_fn(activation):
+def get_activation_fn(activation: str) -> Callable[[torch.Tensor], torch.Tensor]:
     """Returns the activation function corresponding to `activation`"""
 
     if activation == "relu":

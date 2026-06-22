@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -14,12 +14,12 @@ logger.setLevel(logging.INFO)
 class SelfMultiheadAttention(nn.Module):
     def __init__(
         self,
-        embed_dim,
-        num_heads,
-        dropout=0.1,
-        bias=True,
-        scaling_factor=1,
-    ):
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = 0.1,
+        bias: bool = True,
+        scaling_factor: int = 1,
+    ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
 
@@ -27,7 +27,9 @@ class SelfMultiheadAttention(nn.Module):
         self.dropout = dropout
 
         self.head_dim = embed_dim // num_heads
-        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+        assert self.head_dim * num_heads == self.embed_dim, (
+            "embed_dim must be divisible by num_heads"
+        )
         self.scaling = (self.head_dim * scaling_factor) ** -0.5
 
         self.in_proj = nn.Linear(embed_dim, embed_dim * 3, bias=bias)
@@ -35,7 +37,7 @@ class SelfMultiheadAttention(nn.Module):
 
     def forward(
         self,
-        query,
+        query: Any,
         key_padding_mask: Optional[Tensor] = None,
         attn_bias: Optional[Tensor] = None,
         return_attn: bool = False,
@@ -86,7 +88,9 @@ class SelfMultiheadAttention(nn.Module):
         if key_padding_mask is not None:
             # don't attend to padding symbols
             attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            attn_weights.masked_fill_(key_padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool), float("-inf"))
+            attn_weights.masked_fill_(
+                key_padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool), float("-inf")
+            )
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         if not return_attn:
@@ -136,7 +140,7 @@ class TransformerEncoderLayer(nn.Module):
         attention_dropout: float = 0.1,
         activation_dropout: float = 0.0,
         activation_fn: str = "gelu",
-        post_ln=False,
+        post_ln: bool = False,
     ) -> None:
         super().__init__()
 
@@ -314,7 +318,11 @@ class TransformerEncoderWithPair(nn.Module):
         input_attn_mask = attn_mask
         input_padding_mask = padding_mask
 
-        def fill_attn_mask(attn_mask, padding_mask, fill_val=float("-inf")):
+        def fill_attn_mask(
+            attn_mask: Any,
+            padding_mask: Any,
+            fill_val: float = float("-inf"),
+        ) -> tuple[Any, Any]:
             if attn_mask is not None and padding_mask is not None:
                 # merge key_padding_mask and attn_mask
                 attn_mask = attn_mask.view(x.size(0), -1, seq_len, seq_len)
@@ -329,17 +337,29 @@ class TransformerEncoderWithPair(nn.Module):
         assert attn_mask is not None
         attn_mask, padding_mask = fill_attn_mask(attn_mask, padding_mask)
         for i in range(len(self.layers)):
-            x, attn_mask, _ = self.layers[i](x, padding_mask=padding_mask, attn_bias=attn_mask, return_attn=True)
+            x, attn_mask, _ = self.layers[i](
+                x, padding_mask=padding_mask, attn_bias=attn_mask, return_attn=True
+            )
 
-        def norm_loss(x, eps=1e-10, tolerance=1.0):
+        def norm_loss(
+            x: Any,
+            eps: float = 1e-10,
+            tolerance: float = 1.0,
+        ) -> Any:
             x = x.float()
             max_norm = x.shape[-1] ** 0.5
             norm = torch.sqrt(torch.sum(x**2, dim=-1) + eps)
-            error = torch.nn.functional.relu((norm - max_norm).abs() - tolerance)
-            return error
+            return torch.nn.functional.relu((norm - max_norm).abs() - tolerance)
 
-        def masked_mean(mask, value, dim=-1, eps=1e-10):
-            return (torch.sum(mask * value, dim=dim) / (eps + torch.sum(mask, dim=dim))).mean()
+        def masked_mean(
+            mask: Any,
+            value: Any,
+            dim: int | tuple[int, ...] = -1,
+            eps: float = 1e-10,
+        ) -> Any:
+            return (
+                torch.sum(mask * value, dim=dim) / (eps + torch.sum(mask, dim=dim))
+            ).mean()
 
         x_norm = norm_loss(x)
         if input_padding_mask is not None:
@@ -353,12 +373,20 @@ class TransformerEncoderWithPair(nn.Module):
 
         delta_pair_repr = attn_mask - input_attn_mask
         delta_pair_repr, _ = fill_attn_mask(delta_pair_repr, input_padding_mask, 0)
-        attn_mask = attn_mask.view(bsz, -1, seq_len, seq_len).permute(0, 2, 3, 1).contiguous()
-        delta_pair_repr = delta_pair_repr.view(bsz, -1, seq_len, seq_len).permute(0, 2, 3, 1).contiguous()
+        attn_mask = (
+            attn_mask.view(bsz, -1, seq_len, seq_len).permute(0, 2, 3, 1).contiguous()
+        )
+        delta_pair_repr = (
+            delta_pair_repr.view(bsz, -1, seq_len, seq_len)
+            .permute(0, 2, 3, 1)
+            .contiguous()
+        )
 
         pair_mask = token_mask[..., None] * token_mask[..., None, :]
         delta_pair_repr_norm = norm_loss(delta_pair_repr)
-        delta_pair_repr_norm = masked_mean(pair_mask, delta_pair_repr_norm, dim=(-1, -2))
+        delta_pair_repr_norm = masked_mean(
+            pair_mask, delta_pair_repr_norm, dim=(-1, -2)
+        )
 
         if self.final_head_layer_norm is not None:
             delta_pair_repr = self.final_head_layer_norm(delta_pair_repr)

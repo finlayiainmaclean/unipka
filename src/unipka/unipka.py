@@ -1,24 +1,26 @@
-from collections import defaultdict, deque
 import logging
 import math
 import os
 import sys
 import warnings
-from typing import Dict, Literal, Optional, Tuple
+from collections import defaultdict, deque
+from typing import Any, Literal, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Crippen
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
-from ._internal.tautomers import tautomer_seeds_at_formal_charge
-from ._internal.solvation import get_solvation_energy as _get_solvation_energy
-from ._internal.draw import calc_base_name, draw_ensemble, get_neutral_base_name
-from ._internal.conformer import ConformerGen
+
+from ._internal.conformer import ConformerGen, UnimolFeatures
+from ._internal.coordinates import transplant_coordinates
 from ._internal.dataset import MolDataset
+from ._internal.draw import calc_base_name, draw_ensemble, get_neutral_base_name
 from ._internal.model import UniMolModel
+from ._internal.solvation import get_solvation_energy as _get_solvation_energy
+from ._internal.tautomers import tautomer_seeds_at_formal_charge
 from ._internal.template import (
     FILTER_PATTERNS,
     LN10,
@@ -31,18 +33,15 @@ from ._internal.template import (
     log_sum_exp,
     prot,
     prot_template_mol,
+    read_template,
     sanitize_filter_mols,
     stereo_filter_mols,
-    read_template,
 )
-from ._internal.coordinates import transplant_coordinates
-from ._internal.widget import Widget
 from ._internal.temporal_activity import heartbeat
-
+from ._internal.widget import Widget
 from .assets import get_model_path, get_pattern_path, load_kpuu_model
 
-
-RDLogger.DisableLog("rdApp.*")
+RDLogger.DisableLog("rdApp.*")  # ty: ignore[unresolved-attribute]
 warnings.filterwarnings(action="ignore")
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -56,22 +55,24 @@ R = 8.314  # J/mol/K
 
 
 class EnumerationError(Exception):
-    pass
+    """Raised when microstate enumeration fails for a molecule."""
 
 
 def _same_mol(mol1: Chem.Mol, mol2: Chem.Mol) -> bool:
     inchi_options = "/FixedH"
     inchi1 = Chem.MolToInchiKey(mol1, options=inchi_options)
     inchi2 = Chem.MolToInchiKey(mol2, options=inchi_options)
-    
-    return inchi1==inchi2
+
+    return inchi1 == inchi2
 
 
-def validate_acid_base_pair(acid_macrostate, base_macrostate):
+def validate_acid_base_pair(
+    acid_macrostate: list[str], base_macrostate: list[str]
+) -> None:
     """
     Validate that acid and base macrostates have consistent hydrogen counts.
     Raises ValueError if validation fails.
-    
+
     Parameters:
     -----------
     acid_smiles_list : list
@@ -79,52 +80,64 @@ def validate_acid_base_pair(acid_macrostate, base_macrostate):
     base_smiles_list : list
         List of SMILES for base macrostate
     """
-    def count_hydrogens(smiles):
+
+    def count_hydrogens(smiles: str) -> int:
         """Count total hydrogens in a molecule from SMILES"""
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             raise ValueError(f"Invalid SMILES: {smiles}")
-        
+
         # Add explicit hydrogens to get accurate count
         mol_with_h = Chem.AddHs(mol)
-        return sum(1 for atom in mol_with_h.GetAtoms() if atom.GetSymbol() == 'H')
-        
-    
+        return sum(1 for atom in mol_with_h.GetAtoms() if atom.GetSymbol() == "H")
+
     # Count hydrogens in all acid species
     acid_h_counts = [count_hydrogens(smi) for smi in acid_macrostate]
     base_h_counts = [count_hydrogens(smi) for smi in base_macrostate]
-    
+
     # Check 1: All acid species have same number of hydrogens
     acid_unique_counts = set(acid_h_counts)
     if len(acid_unique_counts) != 1:
-        acid_counts_str = ", ".join([f"{smi}: {h}H" for smi, h in zip(acid_macrostate, acid_h_counts)])
-        raise ValueError(f"Acid species have different hydrogen counts: {acid_counts_str}")
-    
-    # Check 2: All base species have same number of hydrogens  
+        acid_counts_str = ", ".join(
+            [f"{smi}: {h}H" for smi, h in zip(acid_macrostate, acid_h_counts)]
+        )
+        raise ValueError(
+            f"Acid species have different hydrogen counts: {acid_counts_str}"
+        )
+
+    # Check 2: All base species have same number of hydrogens
     base_unique_counts = set(base_h_counts)
     if len(base_unique_counts) != 1:
-        base_counts_str = ", ".join([f"{smi}: {h}H" for smi, h in zip(base_macrostate, base_h_counts)])
-        raise ValueError(f"Base species have different hydrogen counts: {base_counts_str}")
-    
+        base_counts_str = ", ".join(
+            [f"{smi}: {h}H" for smi, h in zip(base_macrostate, base_h_counts)]
+        )
+        raise ValueError(
+            f"Base species have different hydrogen counts: {base_counts_str}"
+        )
+
     # Check 3: Acid has exactly one more hydrogen than base
     acid_h = acid_h_counts[0]
-    base_h = base_h_counts[0] 
-    
+    base_h = base_h_counts[0]
+
     if acid_h != base_h + 1:
-        raise ValueError(f"Acid should have 1 more hydrogen than base. "
-                        f"Got acid: {acid_h}H, base: {base_h}H (difference: {acid_h - base_h})")
+        raise ValueError(
+            f"Acid should have 1 more hydrogen than base. "
+            f"Got acid: {acid_h}H, base: {base_h}H (difference: {acid_h - base_h})"
+        )
 
 
-class UnipKa(object):
+class UnipKa:
+    """Wrapper around the UnipKa model for pKa, logD, and microstate calculations."""
+
     def __init__(
         self,
-        batch_size=32,
-        remove_hs=False,
+        batch_size: int = 32,
+        remove_hs: bool = False,
         use_simple_smarts: bool = True,
         beam_width: Optional[int] = 20,
         charge_limits: Optional[Tuple[int, int]] = (-2, 2),
         enumerate_tautomers: bool = False,
-    ):
+    ) -> None:
         """
         :param ensemble_beam_width: After each scoring step, at each formal charge ``q`` the
             merged pool is reduced to at most this many microstates with lowest model ``DfG_m``
@@ -139,7 +152,9 @@ class UnipKa(object):
         model_path = get_model_path()
         pattern_path = get_pattern_path(use_simple_smarts=use_simple_smarts)
 
-        self.model = UniMolModel(model_path, output_dim=1, remove_hs=remove_hs).to(self.device)
+        self.model = UniMolModel(str(model_path), output_dim=1, remove_hs=remove_hs).to(
+            self.device
+        )
         self.model.eval()
         self.batch_size = batch_size
         self.params = {"remove_hs": remove_hs}
@@ -149,16 +164,15 @@ class UnipKa(object):
         self.charge_limits = charge_limits
         self.enumerate_tautomers = enumerate_tautomers
 
-
     #### Internal functions ####
     @staticmethod
-    def _get_formal_charge(mol):
+    def _get_formal_charge(mol: Chem.Mol | None) -> tuple[float, float]:
         """
         Calculate the sum of formal charges on all atoms in the molecule.
         This represents the total formal charge of the microstate.
         """
         if mol is None:
-            return float("inf")  # Invalid molecule
+            return float("inf"), float("inf")  # Invalid molecule
 
         formal_charges = []
         for atom in mol.GetAtoms():
@@ -170,7 +184,10 @@ class UnipKa(object):
 
     @staticmethod
     def _get_distribution_from_free_energy(
-        ensemble_free_energy: dict[int, list[tuple[str, Chem.Mol, float]]], /, *, pH: float
+        ensemble_free_energy: dict[int, list[tuple[str, Chem.Mol, float]]],
+        /,
+        *,
+        pH: float,
     ) -> pd.DataFrame:
         ensemble_boltzmann_factor = defaultdict(list)
         partition_function = 0
@@ -188,7 +205,11 @@ class UnipKa(object):
         charges = []
 
         for q, macrostate_boltzmann_factor in ensemble_boltzmann_factor.items():
-            for microstate_smi, microstate_mol, boltzmann_factor in macrostate_boltzmann_factor:
+            for (
+                microstate_smi,
+                microstate_mol,
+                boltzmann_factor,
+            ) in macrostate_boltzmann_factor:
                 fraction = boltzmann_factor / partition_function
                 fractions.append(fraction)
                 smiles_list.append(microstate_smi)
@@ -203,12 +224,16 @@ class UnipKa(object):
                 "charge": charges,
             }
         )
-    
-    def _preprocess_data(self, mols_or_smis: list[str] | list[Chem.Mol]):
+
+    def _preprocess_data(
+        self, mols_or_smis: list[str] | list[Chem.Mol]
+    ) -> list[UnimolFeatures]:
         return self.conformer_gen.transform(mols_or_smis)
 
     @staticmethod
-    def _as_mol_list(mols: str | Chem.Mol | list[str] | list[Chem.Mol]) -> tuple[list[Chem.Mol], list[str]]:
+    def _as_mol_list(
+        mols: str | Chem.Mol | list[str] | list[Chem.Mol],
+    ) -> tuple[list[Chem.Mol], list[str]]:
         if isinstance(mols, Chem.Mol):
             mol_list = [mols]
         elif isinstance(mols, str):
@@ -220,11 +245,15 @@ class UnipKa(object):
                 mol_list = list(mols)
             else:
                 mol_list = [Chem.MolFromSmiles(s) for s in mols]
-      
-        smiles = [Chem.MolToSmiles(m, canonical=True, isomericSmiles=True) for m in mol_list]
+
+        smiles = [
+            Chem.MolToSmiles(m, canonical=True, isomericSmiles=True) for m in mol_list
+        ]
         return mol_list, smiles
 
-    def _predict(self, mols: str | Chem.Mol | list[str] | list[Chem.Mol]):
+    def _predict(
+        self, mols: str | Chem.Mol | list[str] | list[Chem.Mol]
+    ) -> dict[str, float]:
         mol_list, smiles = self._as_mol_list(mols)
 
         unimol_input = self._preprocess_data(mol_list)
@@ -253,8 +282,9 @@ class UnipKa(object):
 
         return dict(zip(smiles, energies, strict=True))
 
-
-    def _decorate_torch_batch(self, batch):
+    def _decorate_torch_batch(
+        self, batch: tuple[Any, Any]
+    ) -> tuple[dict[str, Any], Any | None]:
         """
         Prepares a standard PyTorch batch of data for processing by the model. Handles tensor-based data structures.
 
@@ -264,14 +294,22 @@ class UnipKa(object):
         """
         net_input, net_target = batch
         if isinstance(net_input, dict):
-            net_input, net_target = {k: v.to(self.device) for k, v in net_input.items()}, net_target.to(self.device)
+            net_input, net_target = (
+                {k: v.to(self.device) for k, v in net_input.items()},
+                net_target.to(self.device),
+            )
         else:
-            net_input, net_target = {"net_input": net_input.to(self.device)}, net_target.to(self.device)
+            net_input, net_target = (
+                {"net_input": net_input.to(self.device)},
+                net_target.to(self.device),
+            )
         net_target = None
 
         return net_input, net_target
 
-    def _predict_micro_pKa(self, mol: Chem.Mol | str, /, *, idx: int, mode: Literal["a2b", "b2a"]):
+    def _predict_micro_pKa(
+        self, mol: Chem.Mol | str, /, *, idx: int, mode: Literal["a2b", "b2a"]
+    ) -> float:
         if isinstance(mol, str):
             mol = Chem.MolFromSmiles(mol)
         new_mol = Chem.RemoveHs(prot(mol, idx, mode))
@@ -284,19 +322,27 @@ class UnipKa(object):
         key_b = Chem.MolToSmiles(mol_b, canonical=True, isomericSmiles=True)
         return (DfGm[key_b] - DfGm[key_a]) / LN10 + TRANSLATE_PH
 
-    def _predict_macro_pKa(self, mol: Chem.Mol | str, /, *, mode: Literal["a2b", "b2a"]) -> float:
+    def _predict_macro_pKa(
+        self, mol: Chem.Mol | str, /, *, mode: Literal["a2b", "b2a"]
+    ) -> float:
 
         if isinstance(mol, Chem.Mol):
             smi = Chem.MolToSmiles(mol)
         else:
             smi = mol
-        
-        macrostate_A, macrostate_B = enumerate_template(smi, self.template_a2b, self.template_b2a, mode)
-        if len(macrostate_A)==0 or len(macrostate_B)==0:
+
+        macrostate_A, macrostate_B = enumerate_template(
+            smi, self.template_a2b, self.template_b2a, mode
+        )
+        if len(macrostate_A) == 0 or len(macrostate_B) == 0:
             return np.nan
         DfGm_A = self._predict(macrostate_A)
         DfGm_B = self._predict(macrostate_B)
-        return log_sum_exp(DfGm_A.values()) - log_sum_exp(DfGm_B.values()) + TRANSLATE_PH
+        return (
+            log_sum_exp(list(DfGm_A.values()))
+            - log_sum_exp(list(DfGm_B.values()))
+            + TRANSLATE_PH
+        )
 
     def _predict_pending_pruned_bands(
         self,
@@ -329,7 +375,9 @@ class UnipKa(object):
         return DfGm + q * LN10 * (pH - TRANSLATE_PH)
 
     @staticmethod
-    def _effective_formal_charge_limits(q0: int, limits: Tuple[int, int]) -> tuple[int, int]:
+    def _effective_formal_charge_limits(
+        q0: int, limits: Tuple[int, int]
+    ) -> tuple[int, int]:
         lo, hi = limits
         if lo > hi:
             lo, hi = hi, lo
@@ -387,13 +435,16 @@ class UnipKa(object):
 
         lim = self.charge_limits
         if lim is None:
-            q_lo, q_hi = -10**9, 10**9
+            q_lo, q_hi = -(10**9), 10**9
         else:
             q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
 
         heartbeat()
         from ._internal.tautomers import tautomer_seeds_at_formal_charge
-        seeds = tautomer_seeds_at_formal_charge(mol0, q0, expand=self.enumerate_tautomers)
+
+        seeds = tautomer_seeds_at_formal_charge(
+            mol0, q0, expand=self.enumerate_tautomers
+        )
         ensemble: dict[int, dict[str, Chem.Mol]] = {
             q0: {_mol_canonical_key(m): m for m in seeds}
         }
@@ -410,7 +461,9 @@ class UnipKa(object):
             if lim is not None:
                 self._clip_ensemble_charge_range(ensemble, q_lo, q_hi)
 
-        def expand_from_band(m: Chem.Mol, mode: Literal["a2b", "b2a"]) -> list[Chem.Mol]:
+        def expand_from_band(
+            m: Chem.Mol, mode: Literal["a2b", "b2a"]
+        ) -> list[Chem.Mol]:
             # One-step neighbor generation via SMARTS templates.
             heartbeat()
             template = ta if mode == "a2b" else tb
@@ -428,7 +481,9 @@ class UnipKa(object):
             predict_and_prune()
 
             sig = {q: frozenset(band.keys()) for q, band in ensemble.items()}
-            if prev_sig and all(sig.get(q) == prev_sig.get(q) for q in set(sig) | set(prev_sig)):
+            if prev_sig and all(
+                sig.get(q) == prev_sig.get(q) for q in set(sig) | set(prev_sig)
+            ):
                 break  # (ii) beams stationary
             prev_sig = sig
 
@@ -481,7 +536,11 @@ class UnipKa(object):
 
         heartbeat()
         predict_and_prune()
-        out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
+        out = {
+            q: sorted(band.values(), key=_mol_canonical_key)
+            for q, band in ensemble.items()
+            if band
+        }
         return out, g_cache
 
     def _get_ensemble_unpruned(
@@ -503,11 +562,13 @@ class UnipKa(object):
         q0 = Chem.GetFormalCharge(mol0)
         lim = self.charge_limits
         if lim is None:
-            q_lo, q_hi = -10**9, 10**9
+            q_lo, q_hi = -(10**9), 10**9
         else:
             q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
         heartbeat()
-        seeds = tautomer_seeds_at_formal_charge(mol0, q0, expand=self.enumerate_tautomers)
+        seeds = tautomer_seeds_at_formal_charge(
+            mol0, q0, expand=self.enumerate_tautomers
+        )
         ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols(seeds)}
 
         heartbeat()
@@ -534,7 +595,9 @@ class UnipKa(object):
             visited_a2b.add(q_src)
             n_down += 1
             heartbeat()
-            _, m_b = _enumerate_template_mols(list(band.values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS)
+            _, m_b = _enumerate_template_mols(
+                list(band.values()), ta, tb, "a2b", maxiter, 0, FILTER_PATTERNS
+            )
             if not m_b:
                 continue
             q_dst = q_src - 1
@@ -566,7 +629,9 @@ class UnipKa(object):
             visited_b2a.add(q_src)
             n_up += 1
             heartbeat()
-            m_a, _ = _enumerate_template_mols(list(band.values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS)
+            m_a, _ = _enumerate_template_mols(
+                list(band.values()), ta, tb, "b2a", maxiter, 0, FILTER_PATTERNS
+            )
             if not m_a:
                 continue
             q_dst = q_src + 1
@@ -575,7 +640,11 @@ class UnipKa(object):
             _band_merge(ensemble.setdefault(q_dst, {}), m_a)
             up_queue.append(q_dst)
 
-        out = {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items() if band}
+        out = {
+            q: sorted(band.values(), key=_mol_canonical_key)
+            for q, band in ensemble.items()
+            if band
+        }
         all_mols = [m for macrostate in out.values() for m in macrostate]
         heartbeat()
         pred = self._predict(all_mols) if all_mols else {}
@@ -619,7 +688,11 @@ class UnipKa(object):
             for m in macrostate:
                 s = _mol_canonical_key(m)
                 if s not in g_cache:
-                    logger.warning("Missing cached energy for %s at charge %s after pruned ensemble", s, q)
+                    logger.warning(
+                        "Missing cached energy for %s at charge %s after pruned ensemble",
+                        s,
+                        q,
+                    )
                     continue
                 row.append((s, Chem.Mol(m), g_cache[s]))
             ensemble_free_energy[q] = row
@@ -629,48 +702,64 @@ class UnipKa(object):
         return ensemble, ensemble_free_energy
 
     #### Public functions ####
-    def get_macro_pka_from_macrostates(self, *, acid_macrostate: list[str | Chem.Mol], base_macrostate: list[str | Chem.Mol]) -> float:
+    def get_macro_pka_from_macrostates(
+        self,
+        *,
+        acid_macrostate: list[str | Chem.Mol],
+        base_macrostate: list[str | Chem.Mol],
+    ) -> float:
+        """Compute macroscopic pKa from explicit acid and base macrostate ensembles."""
 
-        
-        
-        
         if isinstance(acid_macrostate[0], Chem.Mol):
             acid_macrostate = [Chem.MolToSmiles(mol) for mol in acid_macrostate]
 
         if isinstance(base_macrostate[0], Chem.Mol):
             base_macrostate = [Chem.MolToSmiles(mol) for mol in base_macrostate]
 
-        validate_acid_base_pair(acid_macrostate=acid_macrostate, base_macrostate=base_macrostate)
-
+        validate_acid_base_pair(
+            acid_macrostate=acid_macrostate, base_macrostate=base_macrostate
+        )
 
         DfGm_A = self._predict(acid_macrostate)
         DfGm_B = self._predict(base_macrostate)
-        return log_sum_exp(DfGm_A.values()) - log_sum_exp(DfGm_B.values()) + TRANSLATE_PH
+        return (
+            log_sum_exp(list(DfGm_A.values()))
+            - log_sum_exp(list(DfGm_B.values()))
+            + TRANSLATE_PH
+        )
 
     def get_acidic_macro_pka(self, mol: Chem.Mol | str, /) -> float:
+        """Return the acidic macroscopic pKa for a molecule."""
         return self._predict_macro_pKa(mol, mode="a2b")
 
     def get_basic_macro_pka(self, mol: Chem.Mol | str, /) -> float:
+        """Return the basic macroscopic pKa for a molecule."""
         return self._predict_macro_pKa(mol, mode="b2a")
 
     def get_acidic_micro_pka(self, mol: Chem.Mol | str, /, *, idx: int) -> float:
+        """Return the acidic micro-pKa for the ionizable site at ``idx``."""
         return self._predict_micro_pKa(mol, mode="a2b", idx=idx)
 
     def get_basic_micro_pka(self, mol: Chem.Mol | str, /, *, idx: int) -> float:
+        """Return the basic micro-pKa for the ionizable site at ``idx``."""
         return self._predict_micro_pKa(mol, mode="b2a", idx=idx)
-    
+
     def get_dominant_microstate(self, mol: Chem.Mol | str, /, *, pH: float) -> Chem.Mol:
+        """Return the most populated microstate at the given pH."""
 
         df = self.get_distribution(mol, pH=pH)
-        protomer_mol =  df.iloc[0].mol
-        return protomer_mol
+        return df.iloc[0].mol
 
-    def draw_distribution(self, mol: Chem.Mol | str, /, mode: Literal["matplotlib", "jupyter"] = "matplotlib") -> pd.DataFrame:
+    def draw_distribution(
+        self,
+        mol: Chem.Mol | str,
+        /,
+        mode: Literal["matplotlib", "jupyter"] = "matplotlib",
+    ) -> pd.DataFrame:
+        """Plot or display the microstate distribution across pH."""
 
-        
         if isinstance(mol, str):
             mol = Chem.MolFromSmiles(mol)
-
 
         # Free energy predictions from your model, grouped by charge
         ensemble, ensemble_free_energy = self._predict_ensemble_free_energy(mol)
@@ -682,20 +771,23 @@ class UnipKa(object):
 
         for q, macrostate in ensemble_free_energy.items():
             for i, (microstate_smi, _microstate_mol, _dg) in enumerate(macrostate):
-                name_mapping[microstate_smi] = f"{i+1}-{calc_base_name(neutral_base_name, q)}"
+                name_mapping[microstate_smi] = (
+                    f"{i + 1}-{calc_base_name(neutral_base_name, q)}"
+                )
         distribution_dfs = []
         for pH in pHs:
-            distribution_df = self._get_distribution_from_free_energy(ensemble_free_energy, pH=pH)
-            distribution_df['pH'] = pH
+            distribution_df = self._get_distribution_from_free_energy(
+                ensemble_free_energy, pH=pH
+            )
+            distribution_df["pH"] = pH
             distribution_dfs.append(distribution_df)
             for _, row in distribution_df.iterrows():
-                microstate = row['smiles']
-                fraction = row['population']
+                microstate = row["smiles"]
+                fraction = row["population"]
                 fractions[name_mapping[microstate]].append(fraction)
 
         distribution_df = pd.concat(distribution_dfs)
-        distribution_df['name'] = distribution_df.smiles.apply(name_mapping.get)
-
+        distribution_df["name"] = distribution_df.smiles.apply(name_mapping.get)
 
         match mode:
             case "jupyter":
@@ -704,16 +796,29 @@ class UnipKa(object):
             case "matplotlib":
                 plt.figure(figsize=(14, 3), dpi=200)
                 for base_name, fraction_curve in fractions.items():
-                    plt.plot(pHs, fraction_curve, label=base_name.replace("<sub>", "$_{").replace("</sub>", "}$").replace("<sup>", "$^{").replace("</sup>", "}$"))
+                    plt.plot(
+                        pHs,
+                        fraction_curve,
+                        label=base_name.replace("<sub>", "$_{")
+                        .replace("</sub>", "}$")
+                        .replace("<sup>", "$^{")
+                        .replace("</sup>", "}$"),
+                    )
                 plt.xlabel("pH")
                 plt.ylabel("fraction")
                 plt.legend()
                 plt.show()
                 draw_ensemble(ensemble)
+                return distribution_df
             case _:
-                raise ValueError(f"{mode} not a vaid mode. Choose from `matplotlib` and `jupyter`")
-                
-    def get_distribution(self, mol: Chem.Mol | str, /, *, pH: float | list[float] = 7.4) -> pd.DataFrame:
+                raise ValueError(
+                    f"{mode} not a vaid mode. Choose from `matplotlib` and `jupyter`"
+                )
+
+    def get_distribution(
+        self, mol: Chem.Mol | str, /, *, pH: float | list[float] = 7.4
+    ) -> pd.DataFrame:
+        """Return microstate populations and free energies at one or more pH values."""
 
         if isinstance(pH, (int, float)):
             pHs = [pH]
@@ -722,15 +827,12 @@ class UnipKa(object):
         if isinstance(mol, str):
             mol = Chem.MolFromSmiles(mol)
 
-
         # Free energy predictions from your model, grouped by charge
         _, ensemble_free_energy = self._predict_ensemble_free_energy(mol)
-
 
         dfs = []
 
         for pH in pHs:
-
             records = []
             partition_function = 0.0
 
@@ -739,16 +841,36 @@ class UnipKa(object):
                 for microstate_smi, microstate_mol, DfGm in macrostate_free_energy:
                     G_pH = self._ph_adjusted_free_energy(DfGm, q, pH)
                     boltzmann_factor = math.exp(-G_pH)
-                    records.append((q, microstate_smi, microstate_mol, DfGm, G_pH, boltzmann_factor, pH))
+                    records.append(
+                        (
+                            q,
+                            microstate_smi,
+                            microstate_mol,
+                            DfGm,
+                            G_pH,
+                            boltzmann_factor,
+                            pH,
+                        )
+                    )
                     partition_function += boltzmann_factor
 
             # Normalize to get population w_i(pH)
             df = pd.DataFrame(
                 records,
-                columns=["charge", "smiles", "mol", "free_energy", "ph_adjusted_free_energy", "boltzmann_factor", "ph"],
+                columns=[
+                    "charge",
+                    "smiles",
+                    "mol",
+                    "free_energy",
+                    "ph_adjusted_free_energy",
+                    "boltzmann_factor",
+                    "ph",
+                ],
             )
 
-            df["relative_ph_adjusted_free_energy"] = df.ph_adjusted_free_energy - df.ph_adjusted_free_energy.min()
+            df["relative_ph_adjusted_free_energy"] = (
+                df.ph_adjusted_free_energy - df.ph_adjusted_free_energy.min()
+            )
             df["relative_free_energy"] = df.free_energy - df.free_energy.min()
             df["population"] = df["boltzmann_factor"] / partition_function
 
@@ -756,9 +878,10 @@ class UnipKa(object):
 
         df = pd.concat(dfs, ignore_index=True)
 
-
         # Sort for readability
-        df = df.sort_values(by=["ph", "population"], ascending=False).reset_index(drop=True)
+        df = df.sort_values(by=["ph", "population"], ascending=False).reset_index(
+            drop=True
+        )
 
         if mol.GetNumConformers() > 0:
             df["mol"] = df["mol"].apply(lambda x: transplant_coordinates(mol, x))
@@ -766,14 +889,16 @@ class UnipKa(object):
 
         return df
 
-    def get_state_penalty(self, mol: Chem.Mol | str, /, *, T: float = 298.15, pH: float = 7.4) -> float:
+    def get_state_penalty(
+        self, mol: Chem.Mol | str, /, *, T: float = 298.15, pH: float = 7.4
+    ) -> tuple[float, pd.DataFrame]:
         """
         Calculate the state penalty (SP) according to the Lawrenz concept.
 
         Selects formally neutral microstates that minimize atom-centered charges,
         preferring non-zwitterionic forms over zwitterionic counterparts.
         """
-        
+
         df = self.get_distribution(mol, pH=pH)
 
         # Calculate formal charges for all molecules
@@ -801,9 +926,9 @@ class UnipKa(object):
             ].copy()
 
         # Sort reference microstates by population for inspection
-        reference_microstates_df = reference_microstates_df.sort_values(by="population", ascending=False).reset_index(
-            drop=True
-        )
+        reference_microstates_df = reference_microstates_df.sort_values(
+            by="population", ascending=False
+        ).reset_index(drop=True)
 
         # Calculate sum of reference microstate populations
         sum_reference_pop = reference_microstates_df["population"].sum()
@@ -821,23 +946,25 @@ class UnipKa(object):
         SP_kcal_mol = SP_J_mol / 4184  # Convert to kcal/mol
 
         return SP_kcal_mol, reference_microstates_df
-    
+
     @staticmethod
     def get_solvation_energy(mol: Chem.Mol | str, /) -> float:
+        """Return the aqueous solvation free energy for a molecule."""
         if isinstance(mol, str):
             mol = Chem.MolFromSmiles(mol)
         return _get_solvation_energy(mol)
-    
+
     def predict_brain_penetrance(self, mol: Chem.Mol) -> float:
+        """Predict blood-brain barrier penetration probability using the Kp,uu model."""
         sp, ref_df = self.get_state_penalty(mol, pH=7.4)
         mol = ref_df.iloc[0].mol
         G_solv = _get_solvation_energy(mol)
         logD = self.get_logd(mol, pH=7.4)
         clf = load_kpuu_model()
-        X= np.array([[G_solv, logD, sp]])
-        return clf.predict_proba(X)[0,1]
-    
-    def get_logd(self, mol: Chem.Mol | str, /, *,  pH: float) -> float:
+        X = np.array([[G_solv, logD, sp]])
+        return clf.predict_proba(X)[0, 1]
+
+    def get_logd(self, mol: Chem.Mol | str, /, *, pH: float) -> float:
         """
         Compute logD(pH) from microstate populations and logP values.
 
@@ -850,8 +977,6 @@ class UnipKa(object):
         Returns:
         - logD (float): pH-dependent distribution coefficient
         """
-
-        
 
         df = self.get_distribution(mol, pH=pH)
 
@@ -880,19 +1005,21 @@ class UnipKa(object):
         df["weighted_linear_logP"] = weighted_linear_logP
 
         return logd
-    
-    def draw_logd_distribution(self, mol: Chem.Mol | str, /, mode: Literal["matplotlib"] = "matplotlib") -> pd.DataFrame:
+
+    def draw_logd_distribution(
+        self, mol: Chem.Mol | str, /, mode: Literal["matplotlib"] = "matplotlib"
+    ) -> pd.DataFrame:
         """
         Draw logD distribution across pH range.
-        
+
         Parameters:
         - mol: RDKit Mol object or SMILES string
         - mode: Plotting mode ("matplotlib")
-        
+
         Returns:
         - DataFrame containing pH and logD values
         """
-        
+
         if isinstance(mol, str):
             mol = Chem.MolFromSmiles(mol)
 
@@ -900,17 +1027,19 @@ class UnipKa(object):
         _, ensemble_free_energy = self._predict_ensemble_free_energy(mol)
 
         pHs = np.linspace(0, 14, 1000)
-   
+
         distribution_dfs = []
         logd_values = []
 
         logp_cache = dict()
-        
+
         for pH in pHs:
-            distribution_df = self._get_distribution_from_free_energy(ensemble_free_energy, pH=pH)
-            distribution_df['pH'] = pH
+            distribution_df = self._get_distribution_from_free_energy(
+                ensemble_free_energy, pH=pH
+            )
+            distribution_df["pH"] = pH
             distribution_dfs.append(distribution_df)
-            
+
             # Calculate logD for this pH
             logP_list = []
             weighted_linear_logP = []
@@ -918,7 +1047,7 @@ class UnipKa(object):
             for _, row in distribution_df.iterrows():
                 charge = row["charge"]
                 pop = row["population"]
-                smi_microstate = row['smiles']
+                smi_microstate = row["smiles"]
 
                 # logP for neutral species
                 if charge == 0:
@@ -936,26 +1065,19 @@ class UnipKa(object):
             # Compute logD from weighted sum in linear space
             logd = np.log10(sum(weighted_linear_logP))
             logd_values.append(logd)
-        
 
         match mode:
             case "matplotlib":
                 plt.figure(figsize=(14, 3), dpi=200)
-                plt.plot(pHs, logd_values, linewidth=2, color='blue', label='logD')
+                plt.plot(pHs, logd_values, linewidth=2, color="blue", label="logD")
                 plt.xlabel("pH")
                 plt.ylabel("logD")
                 plt.grid(True, alpha=0.3)
                 plt.show()
-            case _:
-                raise ValueError(f"{mode} not a valid mode. Choose from `matplotlib`")
-        
-
-    
-
+        return pd.DataFrame({"pH": pHs, "logD": logd_values})
 
 
 if __name__ == "__main__":
-
     smi = "C#Cc1cc2c(N(C)Cc3ccc(-c4c(C(=O)O)cnn4C)cc3)ncnc2cc1NCc1ccc(O)cc1N1CCNCC1"
     calc = UnipKa()
     calc.get_distribution(smi)

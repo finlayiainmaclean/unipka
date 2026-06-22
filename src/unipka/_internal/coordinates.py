@@ -1,5 +1,6 @@
 import copy
 import logging
+from typing import cast
 
 import numpy as np
 from rdkit import Chem
@@ -9,13 +10,16 @@ from scipy.spatial.distance import cdist
 
 logger = logging.getLogger(__name__)
 
+
 def get_coordinates(mol: Chem.Mol, conf_id: int | None = 0) -> np.ndarray:
     """Get coordinates from molecular conformer."""
+    if conf_id is None:
+        conf_id = 0
     conf_id = int(conf_id)
-    coords = mol.GetConformer(conf_id).GetPositions()
-    return coords
+    return mol.GetConformer(conf_id).GetPositions()
 
-def set_coordinates(mol: Chem.Mol, coords: np.ndarray, conf_id: int = 0):
+
+def set_coordinates(mol: Chem.Mol, coords: np.ndarray, conf_id: int = 0) -> None:
     """Overwrite (or create) conformer with supplied Cartesian coordinates.
 
     Overwrites (or creates) conformer `conf_id` with the supplied
@@ -24,7 +28,9 @@ def set_coordinates(mol: Chem.Mol, coords: np.ndarray, conf_id: int = 0):
     conf_id = int(conf_id)
     n_atoms = mol.GetNumAtoms()
     if coords.shape != (n_atoms, 3):
-        raise ValueError(f"coords shape {coords.shape} does not match atom count {n_atoms}")
+        raise ValueError(
+            f"coords shape {coords.shape} does not match atom count {n_atoms}"
+        )
 
     # make sure the conformer exists
     if not has_conformer(mol, conf_id=conf_id):
@@ -34,8 +40,8 @@ def set_coordinates(mol: Chem.Mol, coords: np.ndarray, conf_id: int = 0):
 
     conf = mol.GetConformer(conf_id)
     for i in range(mol.GetNumAtoms()):
-        x,y,z = coords[i]
-        conf.SetAtomPosition(i,Point3D(x,y,z))
+        x, y, z = coords[i]
+        conf.SetAtomPosition(i, Point3D(x, y, z))
 
 
 def mmff_optimise(
@@ -45,12 +51,16 @@ def mmff_optimise(
     # Define a force field with constraints on non-hydrogen atoms
     properties = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94")
     if properties is None:
-        logger.warning(f"MMFF properties could not be initialized for molecule {Chem.MolToSmiles(mol)} (possibly contains unsupported atoms like transition metals). Skipping MMFF optimization.")
+        logger.warning(
+            f"MMFF properties could not be initialized for molecule {Chem.MolToSmiles(mol)} (possibly contains unsupported atoms like transition metals). Skipping MMFF optimization."
+        )
         return mol, None
 
     ff = AllChem.MMFFGetMoleculeForceField(mol, properties)
     if ff is None:
-        logger.warning(f"MMFF force field could not be initialized for molecule {Chem.MolToSmiles(mol)} (possibly contains unsupported atoms like transition metals). Skipping MMFF optimization.")
+        logger.warning(
+            f"MMFF force field could not be initialized for molecule {Chem.MolToSmiles(mol)} (possibly contains unsupported atoms like transition metals). Skipping MMFF optimization."
+        )
         return mol, None
 
     if constrained_atom_idxs is not None:
@@ -65,7 +75,8 @@ def mmff_optimise(
     energy = ff.CalcEnergy()
     return mol, energy
 
-def has_conformer(mol: Chem.Mol, /, *, conf_id: int):
+
+def has_conformer(mol: Chem.Mol, /, *, conf_id: int) -> bool:
     conformer_ids = {conf.GetId() for conf in mol.GetConformers()}
     return conf_id in conformer_ids
 
@@ -105,7 +116,10 @@ def _ref_atom_map_for_query(ref_noh: Chem.Mol, query_noh: Chem.Mol) -> tuple[int
 
     ref_match = ref_copy.GetSubstructMatch(mcs_mol)
     query_match = query_copy.GetSubstructMatch(mcs_mol)
-    if len(ref_match) != ref_noh.GetNumAtoms() or len(query_match) != query_noh.GetNumAtoms():
+    if (
+        len(ref_match) != ref_noh.GetNumAtoms()
+        or len(query_match) != query_noh.GetNumAtoms()
+    ):
         raise ValueError(
             f"MCS substructure match incomplete for {Chem.MolToSmiles(query_noh)}"
         )
@@ -119,8 +133,10 @@ def _ref_atom_map_for_query(ref_noh: Chem.Mol, query_noh: Chem.Mol) -> tuple[int
     for ref_idx, query_idx in zip(ref_match, query_match, strict=True):
         mapping[query_idx] = ref_idx
     if any(idx is None for idx in mapping):
-        raise ValueError(f"MCS atom mapping incomplete for {Chem.MolToSmiles(query_noh)}")
-    return tuple(mapping)
+        raise ValueError(
+            f"MCS atom mapping incomplete for {Chem.MolToSmiles(query_noh)}"
+        )
+    return cast(tuple[int, ...], tuple(mapping))
 
 
 def transplant_coordinates(ref: Chem.Mol, query: Chem.Mol) -> Chem.Mol:
@@ -149,9 +165,11 @@ def transplant_coordinates(ref: Chem.Mol, query: Chem.Mol) -> Chem.Mol:
     q_ix = np.array(q_ix)
     r_ix = np.array(r_ix)
 
-    query_coords[q_ix] = ref_coords[r_ix]  # Replace coords of any atom under distance threshold
+    query_coords[q_ix] = ref_coords[
+        r_ix
+    ]  # Replace coords of any atom under distance threshold
 
     set_coordinates(query, query_coords)
 
-    query, _ = mmff_optimise(query, constrained_atom_idxs=q_ix)
+    query, _ = mmff_optimise(query, constrained_atom_idxs=q_ix.tolist())
     return query

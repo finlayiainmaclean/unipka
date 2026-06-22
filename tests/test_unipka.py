@@ -1,8 +1,9 @@
-import pytest
-import pandas as pd
 import numpy as np
+import pandas as pd
+import pytest
 from rdkit import Chem
-from unipka.unipka import UnipKa, EnumerationError
+
+from unipka.unipka import EnumerationError, UnipKa
 
 
 @pytest.fixture
@@ -19,7 +20,7 @@ def sample_molecules():
         "acetic_acid": "CC(=O)O",
         "phenol": "c1ccc(cc1)O",
         "aniline": "c1ccc(cc1)N",
-        "imidazole": "c1c[nH]cn1"
+        "imidazole": "c1c[nH]cn1",
     }
 
 
@@ -27,17 +28,17 @@ class TestUnipKaInitialization:
     def test_init_default_params(self):
         calc = UnipKa()
         assert calc.batch_size == 32
-        assert calc.device.type in ['cpu', 'cuda']
-        assert hasattr(calc, 'model')
-        assert hasattr(calc, 'conformer_gen')
-        assert hasattr(calc, 'template_a2b')
-        assert hasattr(calc, 'template_b2a')
+        assert calc.device.type in ["cpu", "cuda"]
+        assert hasattr(calc, "model")
+        assert hasattr(calc, "conformer_gen")
+        assert hasattr(calc, "template_a2b")
+        assert hasattr(calc, "template_b2a")
 
     def test_init_custom_params(self):
         calc = UnipKa(batch_size=16, remove_hs=True, enumerate_tautomers=True)
         assert calc.batch_size == 16
         assert calc.params["remove_hs"]
-        assert calc.device.type == 'cpu'
+        assert calc.device.type == "cpu"
         assert calc.enumerate_tautomers is True
 
 
@@ -73,25 +74,25 @@ class TestUnipKaPublicMethods:
         df = unipka_calc.get_distribution(sample_molecules["piperidine"], pH=7.4)
         assert isinstance(df, pd.DataFrame)
         assert not df.empty
-        assert 'population' in df.columns
-        assert 'smiles' in df.columns
-        assert 'charge' in df.columns
-        assert 'mol' in df.columns
-        assert np.isclose(df['population'].sum(), 1.0, atol=1e-6)
+        assert "population" in df.columns
+        assert "smiles" in df.columns
+        assert "charge" in df.columns
+        assert "mol" in df.columns
+        assert np.isclose(df["population"].sum(), 1.0, atol=1e-6)
 
     def test_get_distribution_mol_input(self, unipka_calc, sample_molecules):
         mol = Chem.MolFromSmiles(sample_molecules["piperidine"])
         df = unipka_calc.get_distribution(mol, pH=7.4)
         assert isinstance(df, pd.DataFrame)
         assert not df.empty
-        assert np.isclose(df['population'].sum(), 1.0, atol=1e-6)
+        assert np.isclose(df["population"].sum(), 1.0, atol=1e-6)
 
     def test_get_distribution_different_ph(self, unipka_calc, sample_molecules):
         df1 = unipka_calc.get_distribution(sample_molecules["piperidine"], pH=2.0)
         df2 = unipka_calc.get_distribution(sample_molecules["piperidine"], pH=12.0)
-        
+
         # Distributions should be different at different pH
-        assert not df1['population'].equals(df2['population'])
+        assert not df1["population"].equals(df2["population"])
 
     def test_get_distribution_multiple_ph(self, unipka_calc, sample_molecules):
         pHs = [2.0, 7.4, 12.0]
@@ -110,12 +111,16 @@ class TestUnipKaPublicMethods:
             assert len(block) == n_microstates
             assert np.isclose(block["population"].sum(), 1.0, atol=1e-6)
 
-        microstates_per_ph = {ph: set(df_multi[df_multi["ph"] == ph]["smiles"]) for ph in pHs}
+        microstates_per_ph = {
+            ph: set(df_multi[df_multi["ph"] == ph]["smiles"]) for ph in pHs
+        }
         assert len(microstates_per_ph) == len(pHs)
         assert all(s == microstates_per_ph[pHs[0]] for s in microstates_per_ph.values())
 
     def test_get_dominant_microstate(self, unipka_calc, sample_molecules):
-        mol = unipka_calc.get_dominant_microstate(sample_molecules["piperidine"], pH=7.4)
+        mol = unipka_calc.get_dominant_microstate(
+            sample_molecules["piperidine"], pH=7.4
+        )
         assert isinstance(mol, Chem.Mol)
         assert mol.GetNumAtoms() > 0
 
@@ -125,7 +130,9 @@ class TestUnipKaPublicMethods:
         assert -10 < logd < 10  # Reasonable logD range
 
     def test_get_state_penalty(self, unipka_calc, sample_molecules):
-        sp, reference_df = unipka_calc.get_state_penalty(sample_molecules["piperidine"], pH=7.4)
+        sp, reference_df = unipka_calc.get_state_penalty(
+            sample_molecules["piperidine"], pH=7.4
+        )
         assert isinstance(sp, float)
         assert sp >= 0  # State penalty should be non-negative
         assert isinstance(reference_df, pd.DataFrame)
@@ -135,7 +142,9 @@ class TestUnipKaPublicMethods:
         # Simple test with manually defined macrostates
         macrostate_a = ["CC(=O)O"]  # acetic acid
         macrostate_b = ["CC(=O)[O-]"]  # acetate
-        pka = unipka_calc.get_macro_pka_from_macrostates(acid_macrostate=macrostate_a, base_macrostate=macrostate_b)
+        pka = unipka_calc.get_macro_pka_from_macrostates(
+            acid_macrostate=macrostate_a, base_macrostate=macrostate_b
+        )
         assert isinstance(pka, float)
         assert 0 < pka < 14
 
@@ -143,7 +152,9 @@ class TestUnipKaPublicMethods:
         # Test with Mol objects
         mol_a = [Chem.MolFromSmiles("CC(=O)O")]
         mol_b = [Chem.MolFromSmiles("CC(=O)[O-]")]
-        pka = unipka_calc.get_macro_pka_from_macrostates(acid_macrostate=mol_a, base_macrostate=mol_b)
+        pka = unipka_calc.get_macro_pka_from_macrostates(
+            acid_macrostate=mol_a, base_macrostate=mol_b
+        )
         assert isinstance(pka, float)
         assert 0 < pka < 14
 
@@ -163,7 +174,7 @@ class TestUnipKaPrivateMethods:
 
     def test_get_formal_charge_none(self, unipka_calc):
         result = unipka_calc._get_formal_charge(None)
-        assert result == float("inf")
+        assert result == (float("inf"), float("inf"))
 
     def test_get_distribution_from_free_energy(self, unipka_calc):
         # Mock ensemble free energy data (canonical SMILES, mol, ΔfG°)
@@ -171,15 +182,17 @@ class TestUnipKaPrivateMethods:
             0: [("CCO", Chem.MolFromSmiles("CCO"), -5.0)],  # neutral
             1: [("CC[OH2+]", Chem.MolFromSmiles("CC[OH2+]"), -3.0)],  # protonated
         }
-        df = unipka_calc._get_distribution_from_free_energy(ensemble_free_energy, pH=7.4)
+        df = unipka_calc._get_distribution_from_free_energy(
+            ensemble_free_energy, pH=7.4
+        )
         assert isinstance(df, pd.DataFrame)
         assert not df.empty
-        assert 'population' in df.columns
-        assert 'smiles' in df.columns
-        assert 'mol' in df.columns
-        assert 'charge' in df.columns
-        assert all(isinstance(m, Chem.Mol) for m in df['mol'])
-        assert np.isclose(df['population'].sum(), 1.0, atol=1e-6)
+        assert "population" in df.columns
+        assert "smiles" in df.columns
+        assert "mol" in df.columns
+        assert "charge" in df.columns
+        assert all(isinstance(m, Chem.Mol) for m in df["mol"])
+        assert np.isclose(df["population"].sum(), 1.0, atol=1e-6)
 
     def test_predict_single_molecule(self, unipka_calc):
         result = unipka_calc._predict("CCO")
@@ -216,7 +229,9 @@ class TestUnipKaErrorHandling:
 
     def test_empty_macrostate_lists(self, unipka_calc):
         with pytest.raises((IndexError, ValueError)):
-            unipka_calc.get_macro_pka_from_macrostates(acid_macrostate=[], base_macrostate=[])
+            unipka_calc.get_macro_pka_from_macrostates(
+                acid_macrostate=[], base_macrostate=[]
+            )
 
     def test_ph_extreme_values(self, unipka_calc, sample_molecules):
         # Test with extreme pH values
@@ -233,17 +248,17 @@ class TestUnipKaConsistency:
         """Test that string and Mol inputs give same results."""
         smi = sample_molecules["piperidine"]
         mol = Chem.MolFromSmiles(smi)
-        
+
         pka_str = unipka_calc.get_basic_macro_pka(smi)
         pka_mol = unipka_calc.get_basic_macro_pka(mol)
-        
+
         assert np.isclose(pka_str, pka_mol, atol=1e-6)
 
     def test_distribution_sum_to_one(self, unipka_calc, sample_molecules):
         """Test that microstate populations sum to 1."""
         for smi in sample_molecules.values():
             df = unipka_calc.get_distribution(smi, pH=7.4)
-            total_pop = df['population'].sum()
+            total_pop = df["population"].sum()
             assert np.isclose(total_pop, 1.0, atol=1e-6)
 
     def test_dominant_microstate_consistency(self, unipka_calc, sample_molecules):
@@ -251,38 +266,40 @@ class TestUnipKaConsistency:
         smi = sample_molecules["piperidine"]
         df = unipka_calc.get_distribution(smi, pH=7.4)
         dominant = unipka_calc.get_dominant_microstate(smi, pH=7.4)
-        
+
         # Get the highest population microstate from distribution
         top_row = df.iloc[0]  # Already sorted by population descending
-        
+
         # Compare SMILES strings (dominant microstate mol should match top population)
         dominant_smi = Chem.MolToSmiles(dominant)
-        top_smi = top_row['smiles']
-        
-        assert dominant_smi == top_smi or Chem.CanonSmiles(dominant_smi) == Chem.CanonSmiles(top_smi)
+        top_smi = top_row["smiles"]
+
+        assert dominant_smi == top_smi or Chem.CanonSmiles(
+            dominant_smi
+        ) == Chem.CanonSmiles(top_smi)
 
 
 class TestUnipKaIntegration:
     def test_workflow_piperidine(self, unipka_calc):
         """Test complete workflow for piperidine."""
         smi = "C1CCNCC1"
-        
+
         # Get basic pKa
         pka = unipka_calc.get_basic_macro_pka(smi)
         assert isinstance(pka, float)
-        
+
         # Get distribution at physiological pH
         df = unipka_calc.get_distribution(smi, pH=7.4)
         assert not df.empty
-        
+
         # Get dominant microstate
         dominant = unipka_calc.get_dominant_microstate(smi, pH=7.4)
         assert isinstance(dominant, Chem.Mol)
-        
+
         # Get logD
         logd = unipka_calc.get_logd(smi, pH=7.4)
         assert isinstance(logd, float)
-        
+
         # Get state penalty
         sp, ref_df = unipka_calc.get_state_penalty(smi, pH=7.4)
         assert isinstance(sp, float)
@@ -293,27 +310,27 @@ class TestUnipKaIntegration:
         smi = "c1c[nH]cn1"  # Imidazole
         df = calc.get_distribution(smi, pH=7.4)
         assert not df.empty
-        assert 'population' in df.columns
+        assert "population" in df.columns
         print(df)
 
     def test_2_hydroxypyridine_tautomer_enumeration(self):
         """Test that 2-hydroxypyridine tautomers (lactam/lactim forms) are enumerated when enabled."""
         smi = "Oc1ccccn1"
-        
+
         # 1. Without tautomer enumeration
         calc_no = UnipKa(enumerate_tautomers=False, batch_size=16)
         df_no = calc_no.get_distribution(smi)
         smiles_no = df_no["smiles"].tolist()
-        
+
         # Should contain the lactim form but NOT the lactam (2-pyridone) form
         assert "Oc1ccccn1" in smiles_no
         assert "O=c1cccc[nH]1" not in smiles_no
-        
+
         # 2. With tautomer enumeration
         calc_yes = UnipKa(enumerate_tautomers=True, batch_size=16)
         df_yes = calc_yes.get_distribution(smi)
         smiles_yes = df_yes["smiles"].tolist()
-        
+
         # Should now contain both lactim and lactam forms
         assert "Oc1ccccn1" in smiles_yes
         assert "O=c1cccc[nH]1" in smiles_yes

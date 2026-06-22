@@ -1,10 +1,8 @@
 from typing import Dict, List, Sequence, Union
 
+from IPython.display import SVG, display
 from rdkit import Chem
 from rdkit.Chem.Draw import MolsToGridImage
-from IPython.display import SVG, display
-
-
 
 
 def get_neutral_base_name(ensemble: Dict[int, Union[List[str], List[Chem.Mol]]]) -> str:
@@ -51,7 +49,9 @@ def _macrostate_to_mols(macrostate: Sequence[Union[str, Chem.Mol]]) -> List[Chem
     return [Chem.MolFromSmiles(s) for s in macrostate]
 
 
-def draw_macrostate(macrostate: Sequence[Union[str, Chem.Mol]], base_name: str):
+def draw_macrostate(
+    macrostate: Sequence[Union[str, Chem.Mol]], base_name: str
+) -> object:
     macrostate_mols = _macrostate_to_mols(macrostate)
     macrostate_size = len(macrostate_mols)
     legends = [f"{i + 1}-{base_name}" for i in range(macrostate_size)]
@@ -65,4 +65,3 @@ def draw_ensemble(ensemble: Dict[int, Union[List[str], List[Chem.Mol]]]) -> None
     neutral_base_name = get_neutral_base_name(ensemble)
     for q in q_list:
         draw_macrostate(ensemble[q], calc_base_name(neutral_base_name, q))
-

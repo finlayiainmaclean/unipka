@@ -1,6 +1,7 @@
 import math
 from collections import deque
-from typing import Callable, Dict, List, OrderedDict, Sequence, Tuple, Union
+from collections.abc import Callable, Mapping
+from typing import Any, Sequence, Tuple, Union
 
 import pandas as pd
 from rdkit import Chem
@@ -43,7 +44,7 @@ LN10 = math.log(10)
 TRANSLATE_PH = 6.504894871171601
 
 # Compiled SMARTS for template rows (avoids MolFromSmarts per match per molecule).
-_SMARTS_PATTERN_CACHE: Dict[str, Chem.Mol] = {}
+_SMARTS_PATTERN_CACHE: dict[str, Chem.Mol] = {}
 
 
 def _mol_from_smarts_cached(smarts: str) -> Chem.Mol:
@@ -56,7 +57,9 @@ def _mol_from_smarts_cached(smarts: str) -> Chem.Mol:
     return mol
 
 
-def match_template(template: pd.DataFrame, mol: Chem.Mol, verbose: bool = False) -> list:
+def match_template(
+    template: pd.DataFrame, mol: Chem.Mol, verbose: bool = False
+) -> list:
     """
     Find protonation site using templates
 
@@ -92,26 +95,28 @@ def _mol_canonical_key(mol: Chem.Mol) -> str:
     return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
 
 
-def _dedup_mols(mols: Sequence[Chem.Mol]) -> List[Chem.Mol]:
-    d: Dict[str, Chem.Mol] = {}
+def _dedup_mols(mols: Sequence[Chem.Mol]) -> list[Chem.Mol]:
+    d: dict[str, Chem.Mol] = {}
     for m in mols:
         d.setdefault(_mol_canonical_key(m), m)
     return list(d.values())
 
 
-def _smis_to_mols(smi: Union[str, List[str]]) -> List[Chem.Mol]:
+def _smis_to_mols(smi: Union[str, list[str]]) -> list[Chem.Mol]:
     if isinstance(smi, str):
         return [Chem.MolFromSmiles(smi)]
     return [Chem.MolFromSmiles(s) for s in smi]
 
 
-def _mols_to_canonical_smiles(mols: Sequence[Chem.Mol]) -> List[str]:
+def _mols_to_canonical_smiles(mols: Sequence[Chem.Mol]) -> list[str]:
     return [Chem.MolToSmiles(m, canonical=True, isomericSmiles=True) for m in mols]
 
 
-def prot_template_mol(template: pd.DataFrame, mol: Chem.Mol, mode: str) -> Tuple[List[int], List[Chem.Mol]]:
+def prot_template_mol(
+    template: pd.DataFrame, mol: Chem.Mol, mode: str
+) -> Tuple[list[int], list[Chem.Mol]]:
     sites = match_template(template, mol)
-    products: Dict[str, Chem.Mol] = {}
+    products: dict[str, Chem.Mol] = {}
     for site in sites:
         heartbeat()
         pm = prot(mol, site, mode)
@@ -122,7 +127,9 @@ def prot_template_mol(template: pd.DataFrame, mol: Chem.Mol, mode: str) -> Tuple
     return sites, list(products.values())
 
 
-def prot_template(template: pd.DataFrame, smi: str, mode: str) -> Tuple[List[int], List[str]]:
+def prot_template(
+    template: pd.DataFrame, smi: str, mode: str
+) -> Tuple[list[int], list[str]]:
     """
     Protonate / Deprotonate a SMILES at every found site in the template
 
@@ -150,8 +157,8 @@ def cnt_stereo_atom(smi: str) -> int:
     return cnt_stereo_atom_mol(Chem.MolFromSmiles(smi))
 
 
-def stereo_filter_mols(mols: List[Chem.Mol]) -> List[Chem.Mol]:
-    filtered: Dict[str, Tuple[Chem.Mol, int]] = {}
+def stereo_filter_mols(mols: list[Chem.Mol]) -> list[Chem.Mol]:
+    filtered: dict[str, Tuple[Chem.Mol, int]] = {}
     for mol in mols:
         key = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=False)
         stereo_cnt = cnt_stereo_atom_mol(mol)
@@ -162,7 +169,7 @@ def stereo_filter_mols(mols: List[Chem.Mol]) -> List[Chem.Mol]:
     return [t[0] for t in filtered.values()]
 
 
-def stereo_filter(smis: List[str]) -> List[str]:
+def stereo_filter(smis: list[str]) -> list[str]:
     """
     A filter against SMILES losing stereochemical information in structure processing.
     """
@@ -170,7 +177,9 @@ def stereo_filter(smis: List[str]) -> List[str]:
     return _mols_to_canonical_smiles(stereo_filter_mols(mols))
 
 
-def sanitize_checker_mol(mol: Chem.Mol, filter_patterns: List[Chem.Mol], verbose: bool = False) -> bool:
+def sanitize_checker_mol(
+    mol: Chem.Mol, filter_patterns: list[Chem.Mol], verbose: bool = False
+) -> bool:
     m = Chem.AddHs(Chem.Mol(mol))
     for pattern in filter_patterns:
         match = m.GetSubstructMatches(pattern)
@@ -186,7 +195,9 @@ def sanitize_checker_mol(mol: Chem.Mol, filter_patterns: List[Chem.Mol], verbose
     return True
 
 
-def sanitize_checker(smi: str, filter_patterns: List[Chem.Mol], verbose: bool = False) -> bool:
+def sanitize_checker(
+    smi: str, filter_patterns: list[Chem.Mol], verbose: bool = False
+) -> bool:
     """
     Check if a SMILES can be sanitized and does not contain unreasonable chemical structures.
 
@@ -202,14 +213,20 @@ def sanitize_checker(smi: str, filter_patterns: List[Chem.Mol], verbose: bool = 
     ----
     If the SMILES should be filtered.
     """
-    return sanitize_checker_mol(Chem.MolFromSmiles(smi), filter_patterns, verbose=verbose)
+    return sanitize_checker_mol(
+        Chem.MolFromSmiles(smi), filter_patterns, verbose=verbose
+    )
 
 
-def sanitize_filter_mols(mols: List[Chem.Mol], filter_patterns: List[Chem.Mol] = FILTER_PATTERNS) -> List[Chem.Mol]:
+def sanitize_filter_mols(
+    mols: list[Chem.Mol], filter_patterns: list[Chem.Mol] = FILTER_PATTERNS
+) -> list[Chem.Mol]:
     return [m for m in mols if sanitize_checker_mol(m, filter_patterns)]
 
 
-def sanitize_filter(smis: List[str], filter_patterns: List[Chem.Mol] = FILTER_PATTERNS) -> List[str]:
+def sanitize_filter(
+    smis: list[str], filter_patterns: list[Chem.Mol] = FILTER_PATTERNS
+) -> list[str]:
     """
     A filter for SMILES can be sanitized and does not contain unreasonable chemical structures.
 
@@ -224,23 +241,27 @@ def sanitize_filter(smis: List[str], filter_patterns: List[Chem.Mol] = FILTER_PA
     The list of SMILES filtered.
     """
 
-    return _mols_to_canonical_smiles(sanitize_filter_mols([Chem.MolFromSmiles(s) for s in smis], filter_patterns))
+    return _mols_to_canonical_smiles(
+        sanitize_filter_mols([Chem.MolFromSmiles(s) for s in smis], filter_patterns)
+    )
 
 
-def make_filter(filter_param: OrderedDict) -> Callable:
+def make_filter(
+    filter_param: Mapping[Callable[..., list[str]], dict[str, Any]],
+) -> Callable[[list[str]], list[str]]:
     """
     Make a sequential SMILES filter
 
     Params:
     ----
-    `filter_param`: An `collections.OrderedDict` whose keys are single filter functions and the corresponding values are their parameter dictionary.
+    `filter_param`: A mapping whose keys are single filter functions and the corresponding values are their parameter dictionary.
 
     Return:
     ----
     The sequential filter function
     """
 
-    def seq_filter(smis):
+    def seq_filter(smis: list[str]) -> list[str]:
         for single_filter, param in filter_param.items():
             smis = single_filter(smis, **param)
         return smis
@@ -285,7 +306,7 @@ def prot(mol: Chem.Mol, idx: int, mode: str) -> Chem.Mol:
         else:
             charge_H = atom_H.GetFormalCharge()
             numH_H = atom_H.GetTotalNumHs()
-            if numH_H==0:
+            if numH_H == 0:
                 raise ProtonationError(f"No hydrogen at atom index {idx} to remove.")
             atom_H.SetFormalCharge(charge_H - 1)
             new_numH_H = numH_H - 1
@@ -301,11 +322,9 @@ def prot(mol: Chem.Mol, idx: int, mode: str) -> Chem.Mol:
         mol_prot = Chem.AddHs(mw)
     try:
         Chem.SanitizeMol(mol_prot)
-    except Exception as e:
+    except Exception:
         return None
-    mol_prot = Chem.MolFromSmiles(Chem.MolToSmiles(mol_prot, canonical=False))
-    mol_prot = Chem.AddHs(mol_prot)
-    return mol_prot
+    return Chem.AddHs(Chem.MolFromSmiles(Chem.MolToSmiles(mol_prot, canonical=False)))
 
 
 def read_template(template_file: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -327,14 +346,14 @@ def read_template(template_file: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def _enumerate_template_mols(
-    mols: List[Chem.Mol],
+    mols: list[Chem.Mol],
     template_a2b: pd.DataFrame,
     template_b2a: pd.DataFrame,
     mode: str,
     maxiter: int,
     verbose: int,
-    filter_patterns: List[Chem.Mol],
-) -> Tuple[List[Chem.Mol], List[Chem.Mol]]:
+    filter_patterns: list[Chem.Mol],
+) -> Tuple[list[Chem.Mol], list[Chem.Mol]]:
     """Enumerate microstates while keeping `Chem.Mol` objects (SMILES only at public API boundaries)."""
     if mode == "a2b":
         mols_A_pool, mols_B_pool = list(mols), []
@@ -347,13 +366,18 @@ def _enumerate_template_mols(
         filters = _DEFAULT_ENUMERATION_FILTER_MOLS
     else:
         filters = make_filter(
-            {sanitize_filter_mols: {"filter_patterns": filter_patterns}, stereo_filter_mols: {}}
+            {
+                sanitize_filter_mols: {"filter_patterns": filter_patterns},
+                stereo_filter_mols: {},
+            }
         )
 
     pool_length_A = -1
     pool_length_B = -1
     i = 0
-    while (len(mols_A_pool) != pool_length_A or len(mols_B_pool) != pool_length_B) and i < maxiter:
+    while (
+        len(mols_A_pool) != pool_length_A or len(mols_B_pool) != pool_length_B
+    ) and i < maxiter:
         heartbeat()
         pool_length_A, pool_length_B = len(mols_A_pool), len(mols_B_pool)
         if verbose > 0:
@@ -393,14 +417,14 @@ def _enumerate_template_mols(
 
 
 def enumerate_template(
-    smi: Union[str, List[str]],
+    smi: Union[str, list[str]],
     template_a2b: pd.DataFrame,
     template_b2a: pd.DataFrame,
     mode: str = "a2b",
     maxiter: int = 10,
     verbose: int = 0,
-    filter_patterns: List[Chem.Mol] = FILTER_PATTERNS,
-) -> Tuple[List[str], List[str]]:
+    filter_patterns: list[Chem.Mol] = FILTER_PATTERNS,
+) -> Tuple[list[str], list[str]]:
     """
     Enumerate all the (de)protonation results of one SMILES.
 
@@ -436,22 +460,25 @@ def enumerate_template(
     return _mols_to_canonical_smiles(mols_a), _mols_to_canonical_smiles(mols_b)
 
 
-def log_sum_exp(DfGm: List[float]) -> float:
+def log_sum_exp(DfGm: list[float]) -> float:
     return math.log10(sum([math.exp(-g) for g in DfGm]))
 
 
-def _band_from_mols(mols: Sequence[Chem.Mol]) -> Dict[str, Chem.Mol]:
+def _band_from_mols(mols: Sequence[Chem.Mol]) -> dict[str, Chem.Mol]:
     return {_mol_canonical_key(m): m for m in mols}
 
 
-def _band_merge(dest: Dict[str, Chem.Mol], mols: Sequence[Chem.Mol]) -> None:
+def _band_merge(dest: dict[str, Chem.Mol], mols: Sequence[Chem.Mol]) -> None:
     for m in mols:
         dest.setdefault(_mol_canonical_key(m), m)
 
 
 def get_ensemble(
-    mol: Chem.Mol, template_a2b: pd.DataFrame, template_b2a: pd.DataFrame, maxiter: int = 10
-) -> Dict[int, List[Chem.Mol]]:
+    mol: Chem.Mol,
+    template_a2b: pd.DataFrame,
+    template_b2a: pd.DataFrame,
+    maxiter: int = 10,
+) -> dict[int, list[Chem.Mol]]:
     """
     Build charge-state microstate pools by walking deprotonation / protonation steps.
 
@@ -463,11 +490,17 @@ def get_ensemble(
     """
     mol0 = Chem.Mol(mol)
     q0 = Chem.GetFormalCharge(mol0)
-    ensemble: Dict[int, Dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
+    ensemble: dict[int, dict[str, Chem.Mol]] = {q0: _band_from_mols([mol0])}
 
     heartbeat()
     m0_out, m_b1 = _enumerate_template_mols(
-        list(ensemble[q0].values()), template_a2b, template_b2a, "a2b", maxiter, 0, FILTER_PATTERNS
+        list(ensemble[q0].values()),
+        template_a2b,
+        template_b2a,
+        "a2b",
+        maxiter,
+        0,
+        FILTER_PATTERNS,
     )
     ensemble[q0] = _band_from_mols(m0_out)
     visited_a2b: set[int] = {q0}
@@ -489,7 +522,13 @@ def get_ensemble(
         visited_a2b.add(q_src)
         n_down += 1
         _, m_b = _enumerate_template_mols(
-            list(band.values()), template_a2b, template_b2a, "a2b", maxiter, 0, FILTER_PATTERNS
+            list(band.values()),
+            template_a2b,
+            template_b2a,
+            "a2b",
+            maxiter,
+            0,
+            FILTER_PATTERNS,
         )
         if not m_b:
             continue
@@ -499,7 +538,13 @@ def get_ensemble(
 
     heartbeat()
     m_a1, m0_b2a = _enumerate_template_mols(
-        list(ensemble[q0].values()), template_a2b, template_b2a, "b2a", maxiter, 0, FILTER_PATTERNS
+        list(ensemble[q0].values()),
+        template_a2b,
+        template_b2a,
+        "b2a",
+        maxiter,
+        0,
+        FILTER_PATTERNS,
     )
     ensemble[q0] = _band_from_mols(m0_b2a)
     visited_b2a: set[int] = {q0}
@@ -521,7 +566,13 @@ def get_ensemble(
         visited_b2a.add(q_src)
         n_up += 1
         m_a, _ = _enumerate_template_mols(
-            list(band.values()), template_a2b, template_b2a, "b2a", maxiter, 0, FILTER_PATTERNS
+            list(band.values()),
+            template_a2b,
+            template_b2a,
+            "b2a",
+            maxiter,
+            0,
+            FILTER_PATTERNS,
         )
         if not m_a:
             continue
@@ -529,4 +580,6 @@ def get_ensemble(
         _band_merge(ensemble.setdefault(q_dst, {}), m_a)
         up_queue.append(q_dst)
 
-    return {q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items()}
+    return {
+        q: sorted(band.values(), key=_mol_canonical_key) for q, band in ensemble.items()
+    }
