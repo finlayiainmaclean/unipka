@@ -4,6 +4,7 @@ import os
 import sys
 import warnings
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from typing import Any, Literal, Optional, Tuple
 
 import matplotlib.pyplot as plt
@@ -31,6 +32,7 @@ from ._internal.template import (
     _mol_canonical_key,
     enumerate_template,
     log_sum_exp,
+    match_template,
     prot,
     prot_template_mol,
     read_template,
@@ -52,6 +54,28 @@ logging.basicConfig(
 logger = logging.getLogger("unimol_free_energy.inference")
 
 R = 8.314  # J/mol/K
+
+
+@dataclass
+class Microstate:
+    """An acid/base microstate pair for a single ionizable site.
+
+    Attributes
+    ----------
+    acid : rdkit.Chem.Mol
+        The molecule protonated at the site.
+    base : rdkit.Chem.Mol
+        The molecule deprotonated at the site (conjugate base of ``acid``).
+    pka : float
+        The micro-pKa of the acid/base equilibrium at the site.
+    idx : int
+        The atom index of the ionizable site on the query molecule.
+    """
+
+    acid: Chem.Mol
+    base: Chem.Mol
+    pka: float
+    idx: int
 
 
 class EnumerationError(Exception):
@@ -440,7 +464,6 @@ class UnipKa:
             q_lo, q_hi = self._effective_formal_charge_limits(q0, lim)
 
         heartbeat()
-        from ._internal.tautomers import tautomer_seeds_at_formal_charge
 
         seeds = tautomer_seeds_at_formal_charge(
             mol0, q0, expand=self.enumerate_tautomers
@@ -1075,6 +1098,53 @@ class UnipKa:
                 plt.grid(True, alpha=0.3)
                 plt.show()
         return pd.DataFrame({"pH": pHs, "logD": logd_values})
+
+    def get_microstates(
+        self, mol: Chem.Mol | str, min_pka: float, max_pka: float
+    ) -> list[Microstate]:
+        """Find micro-pKa ionizable sites of ``mol`` whose pKa falls in a range.
+
+        For each protonation/deprotonation site detected on ``mol`` by the UnipKa
+        SMARTS templates, the micro-pKa of the acid/base equilibrium at that site
+        is computed. Sites whose pKa lies within ``pka_range`` are returned.
+
+        Parameters
+        ----------
+        mol : rdkit.Chem.Mol | str
+            The query molecule (or SMILES), in a specific protonation state.
+        min_pka : float
+            The minimum pKa value to include.
+        max_pka : float
+            The maximum pKa value to include.
+        calc : unipka.UnipKa
+            A configured UnipKa calculator.
+
+        Returns
+        -------
+            One :class:`Microstate` per matching site, where ``acid`` is protonated
+            at the site and ``base`` is deprotonated (built from ``mol`` by
+            adding/removing a hydrogen via RDKit).
+        """
+
+        if isinstance(mol, str):
+            mol = Chem.MolFromSmiles(mol)
+        results = []
+
+        # Acidic sites: ``mol`` is the acid, deprotonating gives the conjugate base.
+        for idx in match_template(self.template_a2b, mol):
+            pka = self.get_acidic_micro_pka(mol, idx=idx)
+            if min_pka <= pka <= max_pka:
+                base = Chem.RemoveHs(prot(mol, idx, "a2b"))
+                results.append(Microstate(Chem.RemoveHs(Chem.Mol(mol)), base, pka, idx))
+
+        # Basic sites: ``mol`` is the base, protonating gives the conjugate acid.
+        for idx in match_template(self.template_b2a, mol):
+            pka = self.get_basic_micro_pka(mol, idx=idx)
+            if min_pka <= pka <= max_pka:
+                acid = Chem.RemoveHs(prot(mol, idx, "b2a"))
+                results.append(Microstate(acid, Chem.RemoveHs(Chem.Mol(mol)), pka, idx))
+
+        return results
 
 
 if __name__ == "__main__":
