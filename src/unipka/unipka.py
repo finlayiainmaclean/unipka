@@ -54,6 +54,10 @@ logging.basicConfig(
 logger = logging.getLogger("unimol_free_energy.inference")
 
 R = 8.314  # J/mol/K
+T_REF = 298.15  # K (model reference temperature)
+RT_KCAL = (
+    R * T_REF / 4184.0
+)  # kcal/mol (~0.5925); converts reduced RT units to kcal/mol
 
 
 @dataclass
@@ -396,7 +400,8 @@ class UnipKa:
 
     @staticmethod
     def _ph_adjusted_free_energy(DfGm: float, q: int, pH: float) -> float:
-        return DfGm + q * LN10 * (pH - TRANSLATE_PH)
+        """pH-adjusted free energy in kcal/mol (model ``DfG_m`` is in reduced RT units)."""
+        return (DfGm + q * LN10 * (pH - TRANSLATE_PH)) * RT_KCAL
 
     @staticmethod
     def _effective_formal_charge_limits(
@@ -862,14 +867,15 @@ class UnipKa:
             # Collect Boltzmann weights and energy terms
             for q, macrostate_free_energy in ensemble_free_energy.items():
                 for microstate_smi, microstate_mol, DfGm in macrostate_free_energy:
-                    G_pH = self._ph_adjusted_free_energy(DfGm, q, pH)
-                    boltzmann_factor = math.exp(-G_pH)
+                    G_pH = self._ph_adjusted_free_energy(DfGm, q, pH)  # kcal/mol
+                    boltzmann_factor = math.exp(-G_pH / RT_KCAL)
                     records.append(
                         (
                             q,
                             microstate_smi,
                             microstate_mol,
-                            DfGm,
+                            DfGm
+                            * RT_KCAL,  # kcal/mol (model DfG_m is in reduced RT units)
                             G_pH,
                             boltzmann_factor,
                             pH,
