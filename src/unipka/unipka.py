@@ -55,7 +55,9 @@ logger = logging.getLogger("unimol_free_energy.inference")
 
 R = 8.314  # J/mol/K
 T_REF = 298.15  # K (model reference temperature)
-RT_KCAL = R * T_REF / 4184.0  # kcal/mol (~0.5925); converts reduced RT units to kcal/mol
+RT_KCAL = (
+    R * T_REF / 4184.0
+)  # kcal/mol (~0.5925); converts reduced RT units to kcal/mol
 
 
 @dataclass
@@ -872,7 +874,8 @@ class UnipKa:
                             q,
                             microstate_smi,
                             microstate_mol,
-                            DfGm * RT_KCAL,  # kcal/mol (model DfG_m is in reduced RT units)
+                            DfGm
+                            * RT_KCAL,  # kcal/mol (model DfG_m is in reduced RT units)
                             G_pH,
                             boltzmann_factor,
                             pH,
