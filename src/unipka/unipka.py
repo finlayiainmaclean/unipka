@@ -4,8 +4,9 @@ import os
 import sys
 import warnings
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, Tuple
+from typing import Any, Iterator, Literal, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -335,6 +336,18 @@ class UnipKa:
 
         return net_input, net_target
 
+    @contextmanager
+    def _posed(self, mol: Chem.Mol | str) -> Iterator[None]:
+        """Featurise every microstate predicted in this block in ``mol``'s pose, if it has one."""
+        # ponytail: the pose is instance state, so one UnipKa must not run posed calls on
+        # two threads at once; pass the pose down through _predict if that is ever needed.
+        posed = isinstance(mol, Chem.Mol) and mol.GetNumConformers() > 0
+        self.conformer_gen.pose = mol if posed else None
+        try:
+            yield
+        finally:
+            self.conformer_gen.pose = None
+
     def _predict_micro_pKa(
         self, mol: Chem.Mol | str, /, *, idx: int, mode: Literal["a2b", "b2a"]
     ) -> float:
@@ -345,7 +358,8 @@ class UnipKa:
             mol_a, mol_b = mol, new_mol
         else:
             mol_b, mol_a = mol, new_mol
-        DfGm = self._predict([mol_a, mol_b])
+        with self._posed(mol):
+            DfGm = self._predict([mol_a, mol_b])
         key_a = Chem.MolToSmiles(mol_a, canonical=True, isomericSmiles=True)
         key_b = Chem.MolToSmiles(mol_b, canonical=True, isomericSmiles=True)
         return (DfGm[key_b] - DfGm[key_a]) / LN10 + TRANSLATE_PH
@@ -364,8 +378,9 @@ class UnipKa:
         )
         if len(macrostate_A) == 0 or len(macrostate_B) == 0:
             return np.nan
-        DfGm_A = self._predict(macrostate_A)
-        DfGm_B = self._predict(macrostate_B)
+        with self._posed(mol):
+            DfGm_A = self._predict(macrostate_A)
+            DfGm_B = self._predict(macrostate_B)
         return (
             log_sum_exp(list(DfGm_A.values()))
             - log_sum_exp(list(DfGm_B.values()))
@@ -693,14 +708,17 @@ class UnipKa:
 
         ensemble: dict[int, list[Chem.Mol]]
         g_cache: dict[str, float]
-        try:
-            ensemble, g_cache = self._get_ensemble_pruned(mol)
-            heartbeat()
-        except EnumerationError as e:
-            logger.warning(f"Enumeration error: {e}. Retrying with unpruned ensemble.")
-            heartbeat()
-            ensemble, g_cache = self._get_ensemble_unpruned(mol)
-            heartbeat()
+        with self._posed(mol):
+            try:
+                ensemble, g_cache = self._get_ensemble_pruned(mol)
+                heartbeat()
+            except EnumerationError as e:
+                logger.warning(
+                    f"Enumeration error: {e}. Retrying with unpruned ensemble."
+                )
+                heartbeat()
+                ensemble, g_cache = self._get_ensemble_unpruned(mol)
+                heartbeat()
 
         if len(ensemble.keys()) < 2:
             raise EnumerationError(

@@ -10,6 +10,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from scipy.spatial import distance_matrix
 
+from .coordinates import transplant_coordinates
 from .dict import DICT, DICT_CHARGE, Dictionary
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,8 @@ class ConformerGen(object):
         # Bound to the instance so config changes via a new ConformerGen get a fresh cache.
         cache_size = params.get("cache_size", 4096)
         self._cached_process_smi = lru_cache(maxsize=cache_size)(self._process_smi)
+        # Set by UnipKa while it predicts the microstates of an input that carries a conformer.
+        self.pose: Chem.Mol | None = None
 
     def _init_features(self, **params: Any) -> None:
         """
@@ -88,6 +91,17 @@ class ConformerGen(object):
             raise ValueError(
                 "Unknown conformer generation method: {}".format(self.method)
             )
+        if self.pose is not None:
+            # Every microstate of a posed input is featurised in that pose, so their energies
+            # differ by protonation only. Not cached: the coordinates depend on the pose.
+            mol = (
+                Chem.MolFromSmiles(mol_or_smi)
+                if isinstance(mol_or_smi, str)
+                else mol_or_smi
+            )
+            if mol.GetNumConformers() == 0:
+                mol = transplant_coordinates(self.pose, mol)
+            return self._process_mol(mol)
         if isinstance(mol_or_smi, str):
             return self._cached_process_smi(mol_or_smi)
         # Mols carrying a pre-computed conformer would lose their coords on a SMILES
@@ -197,7 +211,7 @@ def inner_mol2coords(
 
     :return: ``(atoms, coordinates, charges)``.
     """
-    mol = AllChem.AddHs(Chem.Mol(mol))
+    mol = AllChem.AddHs(Chem.Mol(mol), addCoords=True)
     label = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
     atoms, charges = [], []
     for atom in mol.GetAtoms():

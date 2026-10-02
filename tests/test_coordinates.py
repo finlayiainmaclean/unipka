@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from scipy.spatial.distance import pdist
 
 from unipka import UnipKa
+from unipka._internal.conformer import ConformerGen
 from unipka._internal.coordinates import get_coordinates, transplant_coordinates
 
 
@@ -74,3 +77,22 @@ def test_transplant_coordinates_unsupported_metals():
     out = transplant_coordinates(ref, query)
     assert out.GetNumConformers() == 1
     assert out.GetNumAtoms() == 1
+
+
+def test_posed_microstates_share_the_pose():
+    """Every microstate of a posed input is featurised in that pose, with placed hydrogens."""
+    pose = _embed(Chem.MolFromSmiles("NC(=[NH2+])c1ccccc1"))
+    heavy_pose = Chem.RemoveHs(pose)
+    gen = ConformerGen()
+    gen.pose = heavy_pose
+    # the input itself (has a conformer, no H) and a microstate enumerated from it (no conformer)
+    for mol in (heavy_pose, Chem.MolFromSmiles("N=C(N)c1ccccc1")):
+        feats = gen.single_process(mol)
+        dist = feats["src_distance"][1:-1, 1:-1]  # drop BOS/EOS
+        assert (dist + 99 * np.eye(len(dist))).min() > 0.5  # no H stacked at the origin
+        n = heavy_pose.GetNumAtoms()
+        np.testing.assert_allclose(
+            np.sort(pdist(feats["src_coord"][1 : n + 1])),
+            np.sort(pdist(get_coordinates(heavy_pose))),
+            atol=1e-3,
+        )
