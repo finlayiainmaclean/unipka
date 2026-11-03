@@ -303,6 +303,13 @@ def prot(mol: Chem.Mol, idx: int, mode: str) -> Chem.Mol:
             atom_A.SetFormalCharge(charge_A - 1)
             mw.RemoveAtom(idx)
             mol_prot = mw.GetMol()
+        elif hydrogens := [
+            n.GetIdx() for n in atom_H.GetNeighbors() if n.GetAtomicNum() == 1
+        ]:
+            # Hydrogens are explicit atoms (e.g. a molecule read from an SDF): remove one.
+            atom_H.SetFormalCharge(atom_H.GetFormalCharge() - 1)
+            mw.RemoveAtom(hydrogens[0])
+            mol_prot = mw.GetMol()
         else:
             charge_H = atom_H.GetFormalCharge()
             numH_H = atom_H.GetTotalNumHs()
