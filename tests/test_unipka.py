@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 from rdkit import Chem
 
-from unipka.unipka import EnumerationError, Microstate, UnipKa
+from unipka.unipka import Microstate, UnipKa
 
 
 @pytest.fixture
@@ -234,11 +234,31 @@ def test_invalid_smiles(unipka_calc):
         unipka_calc.get_distribution("invalid_smiles", pH=7.4)
 
 
-def test_enumeration_error(unipka_calc):
-    # Test molecule that might fail enumeration
-    simple_molecule = Chem.MolFromSmiles("C")  # methane - no ionizable groups
-    with pytest.raises(EnumerationError):
-        unipka_calc._predict_ensemble_free_energy(simple_molecule)
+@pytest.mark.parametrize("smiles", ["C", "c1ccccc1", "C[N+](C)(C)C"])
+def test_no_ionizable_site_is_one_microstate(unipka_calc, smiles):
+    # Methane, benzene, tetramethylammonium: nothing to (de)protonate.
+    df = unipka_calc.get_distribution(smiles, pH=7.4)
+    assert len(df) == 1 and df.population.iloc[0] == pytest.approx(1.0)
+    assert df.smiles.iloc[0] == Chem.MolToSmiles(Chem.MolFromSmiles(smiles))
+    penalty, reference = unipka_calc.get_state_penalty(smiles, pH=7.4)
+    assert penalty == pytest.approx(0.0) and len(reference) == 1
+
+
+def test_no_ionizable_site_has_no_macro_pka(unipka_calc):
+    assert np.isnan(unipka_calc.get_acidic_macro_pka("c1ccccc1"))
+    assert np.isnan(unipka_calc.get_basic_macro_pka("c1ccccc1"))
+
+
+@pytest.mark.parametrize(
+    ("smiles", "idx", "mode"),
+    [("CC(=O)O", 3, "acidic"), ("c1ccccc1O", 6, "acidic"), ("CCN", 2, "basic")],
+)
+def test_micro_pka_with_explicit_hydrogens(unipka_calc, smiles, idx, mode):
+    # A molecule read from an SDF has explicit hydrogen atoms; heavy-atom indices are kept.
+    mol = Chem.MolFromSmiles(smiles)
+    explicit = Chem.AddHs(mol)
+    get = getattr(unipka_calc, f"get_{mode}_micro_pka")
+    assert get(explicit, idx=idx) == pytest.approx(get(mol, idx=idx), abs=0.05)
 
 
 def test_empty_macrostate_lists(unipka_calc):

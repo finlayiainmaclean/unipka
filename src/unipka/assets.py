@@ -1,5 +1,6 @@
 import hashlib
 import importlib.resources as res
+import os
 from pathlib import Path
 
 import numpy as np
@@ -23,8 +24,12 @@ def _sha256(path: Path) -> str:
 
 
 def get_model_path() -> Path:
-    """Download and cache the asset, return its local path."""
-    cache_dir = Path(user_cache_dir("unipka"))
+    """Download and cache the asset, return its local path.
+
+    The cache directory is ``$UNIPKA_CACHE_DIR`` when set, else the platform's user cache
+    directory for ``unipka``.
+    """
+    cache_dir = Path(os.environ.get("UNIPKA_CACHE_DIR") or user_cache_dir("unipka"))
     cache_dir.mkdir(parents=True, exist_ok=True)
     file_path = cache_dir / ASSET_NAME
 

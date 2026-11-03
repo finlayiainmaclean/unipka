@@ -720,11 +720,11 @@ class UnipKa:
                 ensemble, g_cache = self._get_ensemble_unpruned(mol)
                 heartbeat()
 
-        if len(ensemble.keys()) < 2:
+        # One charge state is a valid ensemble: a molecule with no ionizable site (or only
+        # permanent charges) is its own single microstate.
+        if not ensemble:
             raise EnumerationError(
-                f"Failed to enumerate microstates across 2 charge states for {query_smi}. "
-                "Try widening ``ensemble_formal_charge_limits``, using ``ensemble_beam_width=None``, "
-                "or enumerating manually and calling ``get_macro_pka_from_macrostates``."
+                f"Failed to enumerate any microstate for {query_smi}."
             )
 
         ensemble_free_energy: dict[int, list[tuple[str, Chem.Mol, float]]] = {}
